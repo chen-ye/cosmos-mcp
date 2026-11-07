@@ -73,6 +73,46 @@ const SEARCH_ELEMENTS = /* GraphQL */ `
   ${ELEMENT_CORE}
 `;
 
+const VISUAL_SEARCH_POLICY = /* GraphQL */ `
+  query CosmosMcpVisualSearchPolicy {
+    s3PostPolicyForVisualSearch {
+      signature
+      uploadKey
+      securityToken
+      accessKeyId
+      policyString
+    }
+  }
+`;
+
+const VISUAL_SEARCH_ELEMENTS = /* GraphQL */ `
+  query CosmosMcpVisualSearchElements(
+    $image: String!
+    $text: String
+    $contentType: ElementContentTypeFilter
+    $color: String
+    $order: ElementOrder
+    $pageCursor: String
+    $pageSize: Int
+  ) {
+    searchElements(
+      search: { image: $image, text: $text }
+      filters: { color: $color, contentType: $contentType }
+      order: $order
+      meta: { pageSize: $pageSize, pageCursor: $pageCursor }
+    ) {
+      items {
+        ...ElementCore
+      }
+      meta {
+        nextPageCursor
+        count
+      }
+    }
+  }
+  ${ELEMENT_CORE}
+`;
+
 /**
  * `searchClusters` returns real `Cluster` nodes — owner and all — so ClusterCore
  * spreads onto it unchanged. `filters.isPrivate` is accepted but was observed to
@@ -680,6 +720,8 @@ const ELEMENT_MEDIA = /* GraphQL */ `
 /** Exported for the live integration tests, which replay each document as written. */
 export const browseQueries = Object.freeze({
   CosmosMcpSearchElements: SEARCH_ELEMENTS,
+  CosmosMcpVisualSearchPolicy: VISUAL_SEARCH_POLICY,
+  CosmosMcpVisualSearchElements: VISUAL_SEARCH_ELEMENTS,
   CosmosMcpSearchClusters: SEARCH_CLUSTERS,
   CosmosMcpSearchUsers: SEARCH_USERS,
   CosmosMcpSearchAll: SEARCH_ALL,
@@ -741,6 +783,110 @@ export interface SearchArgs {
 export function buildSearchVariables(args: SearchArgs): Record<string, unknown> {
   const vars: Record<string, unknown> = {
     searchTerm: args.query,
+    pageSize: args.limit ?? DEFAULT_LIMIT,
+    pageCursor: args.cursor ?? null,
+  };
+  if (args.contentType && args.contentType !== "ALL") vars.contentType = args.contentType;
+  if (args.color) vars.color = normalizeColor(args.color);
+  if (args.order) vars.order = ORDER_ALIASES[args.order];
+  return vars;
+}
+
+export type VisualSearchMimeType = "image/jpeg" | "image/png" | "image/webp" | "image/gif";
+
+export interface VisualSearchArgs {
+  imageBase64: string;
+  mimeType: VisualSearchMimeType;
+  query?: string;
+  contentType?: ContentType;
+  color?: string;
+  order?: SearchOrder;
+  cursor?: string;
+  limit?: number;
+}
+
+export interface RawS3PostPolicy {
+  signature: string;
+  uploadKey: string;
+  securityToken?: string | null;
+  accessKeyId?: string | null;
+  policyString: string;
+}
+
+export interface ParsedS3PostPolicy {
+  url: string;
+  uploadKey: string;
+  fields: Record<string, string>;
+}
+
+/**
+ * Extracts the S3 endpoint and multipart form fields from Cosmos's
+ * `S3PostPolicy` response. `policyString` is raw JSON on the wire; S3 expects
+ * it base64-encoded in the `Policy` form field alongside the `x-amz-*`
+ * conditions embedded in `conditions`.
+ */
+export function parseS3PostPolicy(policy: RawS3PostPolicy): ParsedS3PostPolicy {
+  if (!policy?.uploadKey || !policy?.signature || !policy?.policyString) {
+    throw new CosmosError("s3PostPolicyForVisualSearch returned an incomplete S3 post policy", {
+      kind: "server",
+      operation: "CosmosMcpVisualSearchPolicy",
+    });
+  }
+
+  let parsed: { conditions?: unknown[] };
+  try {
+    parsed = JSON.parse(policy.policyString) as { conditions?: unknown[] };
+  } catch (cause) {
+    throw new CosmosError("s3PostPolicyForVisualSearch returned malformed policyString JSON", {
+      kind: "server",
+      operation: "CosmosMcpVisualSearchPolicy",
+      cause,
+    });
+  }
+
+  let bucket: string | undefined;
+  const conditionFields: Record<string, string> = {};
+  for (const cond of parsed.conditions ?? []) {
+    if (cond && typeof cond === "object" && !Array.isArray(cond)) {
+      for (const [k, v] of Object.entries(cond as Record<string, unknown>)) {
+        if (typeof v !== "string") continue;
+        if (k === "bucket") bucket = v;
+        else conditionFields[k] = v;
+      }
+    }
+  }
+
+  if (!bucket) {
+    throw new CosmosError("s3PostPolicyForVisualSearch policyString had no S3 bucket condition", {
+      kind: "server",
+      operation: "CosmosMcpVisualSearchPolicy",
+    });
+  }
+
+  const fields: Record<string, string> = {
+    key: policy.uploadKey,
+    ...conditionFields,
+    Policy: Buffer.from(policy.policyString, "utf8").toString("base64"),
+    "X-Amz-Signature": policy.signature,
+  };
+  if (policy.securityToken) {
+    fields["x-amz-security-token"] = policy.securityToken;
+  }
+
+  return {
+    url: `https://${bucket}.s3.amazonaws.com/`,
+    uploadKey: policy.uploadKey,
+    fields,
+  };
+}
+
+export function buildVisualSearchVariables(
+  uploadKey: string,
+  args: Omit<VisualSearchArgs, "imageBase64" | "mimeType">,
+): Record<string, unknown> {
+  const vars: Record<string, unknown> = {
+    image: uploadKey,
+    text: args.query?.trim() || null,
     pageSize: args.limit ?? DEFAULT_LIMIT,
     pageCursor: args.cursor ?? null,
   };
@@ -1101,6 +1247,116 @@ export const registerBrowseTools: ToolRegistrar = (server, ctx) => {
       );
       const page = elementPage(data.searchElements, previewWidth);
       return ok(`${page.items.length} result(s) for ${JSON.stringify(args.query)} of ${page.totalCount ?? "?"} total.`, page);
+    }),
+  );
+
+  server.registerTool(
+    "cosmos_visual_search",
+    {
+      title: "Visual search by image",
+      description:
+        "Reverse-image and multimodal visual search across cosmos.so. Uploads the supplied base64 image " +
+        "bytes to Cosmos's ephemeral `search/` S3 bucket via `s3PostPolicyForVisualSearch` — without " +
+        "saving anything to the user's library — and queries `searchElements(search: { image, text })`. " +
+        "Pass an optional `query` phrase to combine visual similarity with a text refinement, or filter " +
+        "by `contentType` and `color`. Requires a configured credential (`COSMOS_AUTHORIZATION` or " +
+        "`COSMOS_COOKIE`).",
+      inputSchema: {
+        imageBase64: z
+          .string()
+          .min(1)
+          .describe("Base64-encoded image bytes (without a `data:` URL prefix)."),
+        mimeType: z
+          .enum(["image/jpeg", "image/png", "image/webp", "image/gif"])
+          .describe("MIME type of the encoded image."),
+        query: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Optional text refinement combined with the image in `search: { image, text }`."),
+        contentType: z
+          .enum(["IMAGE", "VIDEO", "PRODUCT", "ALL"])
+          .optional()
+          .describe("Restrict to one medium. ALL (the default) applies no filter."),
+        color: z
+          .string()
+          .optional()
+          .describe("Dominant colour as hex, with or without the leading '#', e.g. '#8B4513'."),
+        order: z
+          .enum(["RELEVANT", "RECENT", "POPULAR", "OLDEST", "RANDOM"])
+          .optional()
+          .describe("Result ordering. Defaults to RELEVANT."),
+        cursor: cursorArg,
+        limit: limitArg,
+        previewWidth: previewWidthArg,
+      },
+      annotations: READ_ONLY,
+    },
+    guard(async (args: VisualSearchArgs & { previewWidth?: number }) => {
+      const previewWidth = args.previewWidth ?? DEFAULT_PREVIEW_WIDTH;
+      await client.requireViewer("cosmos_visual_search");
+
+      const bytes = Buffer.from(args.imageBase64.trim(), "base64");
+      if (bytes.byteLength === 0) {
+        throw new CosmosError("imageBase64 decoded to 0 bytes", {
+          kind: "validation",
+          operation: "cosmos_visual_search",
+        });
+      }
+
+      const policyData = await client.request<{ s3PostPolicyForVisualSearch: RawS3PostPolicy }>(
+        "CosmosMcpVisualSearchPolicy",
+        VISUAL_SEARCH_POLICY,
+        {},
+      );
+      const policy = parseS3PostPolicy(policyData.s3PostPolicyForVisualSearch);
+
+      const form = new FormData();
+      for (const [k, v] of Object.entries(policy.fields)) {
+        form.append(k, v);
+      }
+      form.append("Content-Type", args.mimeType);
+      const ext = args.mimeType.split("/")[1] ?? "bin";
+      form.append("file", new Blob([bytes], { type: args.mimeType }), `search.${ext}`);
+
+      let uploadRes: Response;
+      try {
+        uploadRes = await fetch(policy.url, {
+          method: "POST",
+          body: form,
+          signal: AbortSignal.timeout(client.config.timeoutMs),
+        });
+      } catch (cause) {
+        throw new CosmosError(`cosmos_visual_search: S3 image upload failed (${String(cause)})`, {
+          kind: "network",
+          operation: "cosmos_visual_search",
+          cause,
+        });
+      }
+
+      if (!uploadRes.ok) {
+        const bodyText = await uploadRes.text().catch(() => "");
+        throw new CosmosError(
+          `cosmos_visual_search: S3 image upload rejected (HTTP ${uploadRes.status}): ${bodyText.slice(0, 300)}`,
+          {
+            kind: "server",
+            status: uploadRes.status,
+            operation: "cosmos_visual_search",
+          },
+        );
+      }
+
+      const data = await client.request<{ searchElements: any }>(
+        "CosmosMcpVisualSearchElements",
+        VISUAL_SEARCH_ELEMENTS,
+        buildVisualSearchVariables(policy.uploadKey, args),
+      );
+      const page = elementPage(data.searchElements, previewWidth);
+      const label = args.query ? `visual search + ${JSON.stringify(args.query)}` : "visual search";
+      return ok(
+        `${page.items.length} result(s) for ${label} of ${page.totalCount ?? "?"} total.`,
+        { uploadKey: policy.uploadKey, ...page },
+      );
     }),
   );
 

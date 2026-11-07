@@ -11,6 +11,9 @@
 import { loadConfig } from "./config";
 import { CosmosClient } from "./graphql/client";
 import { clearAuth, configPath, readAuth, redact, writeAuth } from "./auth-store";
+import { SIGNED_IN_ONLY_TOOLS, SIGNED_OUT_TOOLS } from "./tools/catalog";
+
+const TOTAL_TOOLS = SIGNED_OUT_TOOLS.length + SIGNED_IN_ONLY_TOOLS.length;
 
 const out = (s = "") => process.stderr.write(s + "\n");
 
@@ -164,7 +167,7 @@ async function login(): Promise<number> {
   out();
   out(`Signed in as @${viewer.username ?? viewer.id}.`);
   out(`Saved to ${path} (owner-only permissions).`);
-  out("All 36 tools are now available. Restart your MCP client to pick this up.");
+  out(`All ${TOTAL_TOOLS} tools are now available. Restart your MCP client to pick this up.`);
   return 0;
 }
 
@@ -188,7 +191,7 @@ async function status(): Promise<number> {
 
   if (!config.cookie && !config.authorization) {
     out();
-    out("18 of the 36 tools work without signing in: search, browsing and public profiles.");
+    out(`${SIGNED_OUT_TOOLS.length} of the ${TOTAL_TOOLS} tools work without signing in: search, browsing and public profiles.`);
     out("Run `cosmos-mcp login` to unlock saving and collections.");
     return 0;
   }

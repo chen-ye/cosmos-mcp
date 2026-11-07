@@ -89,8 +89,8 @@ test("the stored credential is used when nothing higher-precedence is set", () =
 
   // A developer's own `.env` outranks the stored credential by design, so this
   // assertion only holds when there is no local `.env` cookie to beat it.
-  const hasDotEnvCookie = Boolean(loadConfig({ XDG_CONFIG_HOME: "/nonexistent" }).cookie);
-  if (hasDotEnvCookie) {
+  const dotEnv = loadConfig({ XDG_CONFIG_HOME: "/nonexistent" });
+  if (dotEnv.cookie || dotEnv.authorization || dotEnv.userId) {
     expect(loadConfig(env).cookie).not.toBe(undefined);
     return;
   }

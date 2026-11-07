@@ -40,6 +40,7 @@ export const SIGNED_OUT_TOOLS = [
  * public list rather than failing, so it stays usable signed out.
  */
 export const SIGNED_IN_ONLY_TOOLS = [
+  "cosmos_visual_search",
   "cosmos_cluster_recommendations",
   "cosmos_conversational_search",
   "cosmos_list_my_clusters",

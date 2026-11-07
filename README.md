@@ -188,6 +188,7 @@ Copy [`.env.example`](.env.example) to `.env` for a documented starting point. N
 | Tool | What it does | |
 | --- | --- | :-: |
 | `cosmos_search` | Search every public element by keyword. Filter by content type and colour. | |
+| `cosmos_visual_search` | Reverse-image search from base64 image bytes, with optional text refinement. | A |
 | `cosmos_search_clusters` | Search public collections. Someone has often already built the board you want. | |
 | `cosmos_search_users` | Find people by name or handle. | |
 | `cosmos_search_all` | Search collections, people and elements at once. | |

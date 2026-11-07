@@ -8,6 +8,7 @@ import {
   browseQueries,
   buildSearchClustersVariables,
   buildSearchVariables,
+  buildVisualSearchVariables,
   interleaveSimilar,
   normalizeBoard,
   normalizeConversationalSearch,
@@ -17,6 +18,7 @@ import {
   normalizeSearchElement,
   normalizeSearchUser,
   normalizeSpotlight,
+  parseS3PostPolicy,
   registerBrowseTools,
 } from "../src/tools/browse";
 
@@ -516,6 +518,7 @@ describe("tool registration", () => {
         "cosmos_spotlights",
         "cosmos_suggested_searches",
         "cosmos_view_images",
+        "cosmos_visual_search",
       ].sort(),
     );
     for (const [, t] of registry) expect(t.config.annotations.readOnlyHint).toBe(true);
@@ -1129,6 +1132,130 @@ describe("cosmos_view_images", () => {
     const { run } = call("cosmos_view_images", { elementIds: [3] }, { request: async () => ({ elementView: { element: video } }) });
     const result = await run();
     expect((result.content[1] as { text: string }).text).toContain("poster frame");
+  });
+});
+
+describe("cosmos_visual_search", () => {
+  const realFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  const samplePolicyString = JSON.stringify({
+    expiration: "2026-11-07T07:54:24.224Z",
+    conditions: [
+      { bucket: "prod-cosmos-prod-cf-images-origin" },
+      ["eq", "$key", "search/01a1b4f3-8779-71b1-8d4a-bd87f4325675"],
+      ["content-length-range", "1", "52428800"],
+      ["starts-with", "$Content-Type", "image/"],
+      { "x-amz-credential": "AKIA/20261107/us-east-1/s3/aws4_request" },
+      { "x-amz-algorithm": "AWS4-HMAC-SHA256" },
+      { "x-amz-date": "20261107T075424Z" },
+    ],
+  });
+
+  const samplePolicy = {
+    signature: "sig123",
+    uploadKey: "search/01a1b4f3-8779-71b1-8d4a-bd87f4325675",
+    securityToken: null,
+    accessKeyId: "AKIA",
+    policyString: samplePolicyString,
+  };
+
+  test("parseS3PostPolicy extracts bucket URL and form fields", () => {
+    const parsed = parseS3PostPolicy(samplePolicy);
+    expect(parsed.url).toBe("https://prod-cosmos-prod-cf-images-origin.s3.amazonaws.com/");
+    expect(parsed.uploadKey).toBe("search/01a1b4f3-8779-71b1-8d4a-bd87f4325675");
+    expect(parsed.fields).toEqual({
+      key: "search/01a1b4f3-8779-71b1-8d4a-bd87f4325675",
+      "x-amz-credential": "AKIA/20261107/us-east-1/s3/aws4_request",
+      "x-amz-algorithm": "AWS4-HMAC-SHA256",
+      "x-amz-date": "20261107T075424Z",
+      Policy: Buffer.from(samplePolicyString, "utf8").toString("base64"),
+      "X-Amz-Signature": "sig123",
+    });
+  });
+
+  test("buildVisualSearchVariables normalizes filters and order", () => {
+    expect(
+      buildVisualSearchVariables("search/abc", {
+        query: "  isometric ",
+        contentType: "IMAGE",
+        color: "#ff00aa",
+        order: "RECENT",
+        limit: 5,
+      }),
+    ).toEqual({
+      image: "search/abc",
+      text: "isometric",
+      contentType: "IMAGE",
+      color: "ff00aa",
+      order: "LATEST",
+      pageSize: 5,
+      pageCursor: null,
+    });
+  });
+
+  test("uploads image to S3 and queries searchElements(search: { image, text })", async () => {
+    const uploaded: { url: string; contentType: string | null; key: string | null }[] = [];
+    globalThis.fetch = (async (input: any, init?: RequestInit) => {
+      const form = init?.body as FormData;
+      uploaded.push({
+        url: String(input),
+        contentType: form.get("Content-Type") as string | null,
+        key: form.get("key") as string | null,
+      });
+      return new Response(null, { status: 204 });
+    }) as typeof fetch;
+
+    const { run, calls } = call(
+      "cosmos_visual_search",
+      {
+        imageBase64: Buffer.from([137, 80, 78, 71]).toString("base64"),
+        mimeType: "image/png",
+        query: "isometric",
+        limit: 2,
+      },
+      {
+        viewer: { id: 42, username: "me" },
+        request: async (op) => {
+          if (op === "CosmosMcpVisualSearchPolicy") {
+            return { s3PostPolicyForVisualSearch: samplePolicy };
+          }
+          return { searchElements: elementList([11, 22], { count: 391, nextPageCursor: "c2" }) };
+        },
+      },
+    );
+
+    const p = payloadOf(await run());
+    expect(uploaded).toEqual([
+      {
+        url: "https://prod-cosmos-prod-cf-images-origin.s3.amazonaws.com/",
+        contentType: "image/png",
+        key: "search/01a1b4f3-8779-71b1-8d4a-bd87f4325675",
+      },
+    ]);
+    expect(calls.map((c) => c.op)).toEqual(["CosmosMcpVisualSearchPolicy", "CosmosMcpVisualSearchElements"]);
+    expect(calls[1]!.vars).toEqual({
+      image: "search/01a1b4f3-8779-71b1-8d4a-bd87f4325675",
+      text: "isometric",
+      pageSize: 2,
+      pageCursor: null,
+    });
+    expect(p.uploadKey).toBe("search/01a1b4f3-8779-71b1-8d4a-bd87f4325675");
+    expect(p.items.map((e: any) => e.id)).toEqual([11, 22]);
+    expect(p.totalCount).toBe(391);
+  });
+
+  test("signed out it fails with unauthenticated before making any request", async () => {
+    const { run, calls } = call("cosmos_visual_search", {
+      imageBase64: "AQID",
+      mimeType: "image/png",
+    });
+    const result = await run();
+    expect(result.isError).toBe(true);
+    expect(JSON.parse((result.content[0] as { text: string }).text).error).toBe("unauthenticated");
+    expect(calls).toEqual([]);
   });
 });
 
