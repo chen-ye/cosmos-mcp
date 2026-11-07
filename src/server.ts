@@ -90,13 +90,16 @@ permanent and needs explicit confirmation.
 Browsing, search and public profiles work signed out. Anything that writes, and
 anything touching private or personal data, needs COSMOS_COOKIE configured.`;
 
-export function createServer(config: CosmosConfig = loadConfig()): McpServer {
+export function createServer(
+  config: CosmosConfig = loadConfig(),
+  client: CosmosClient = new CosmosClient(config),
+): McpServer {
   const server = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
     { instructions: INSTRUCTIONS },
   );
 
-  const ctx: ToolContext = { client: new CosmosClient(config) };
+  const ctx: ToolContext = { client };
 
   registerAccountTools(server, ctx);
   registerBrowseTools(server, ctx);

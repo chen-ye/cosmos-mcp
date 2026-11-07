@@ -221,6 +221,7 @@ function help(): number {
   out("cosmos-mcp — unofficial MCP server for cosmos.so");
   out();
   out("  cosmos-mcp           Run the MCP server on stdio. This is what MCP clients invoke.");
+  out("  cosmos-mcp serve     Run the MCP server over Streamable HTTP (/mcp).");
   out("  cosmos-mcp login     Save a cosmos.so credential, after checking it works.");
   out("  cosmos-mcp status    Show which credential is in use and whether it is still valid.");
   out("  cosmos-mcp logout    Remove the saved credential.");
@@ -234,6 +235,8 @@ export async function runCli(argv: string[]): Promise<number | null> {
   switch (argv[0]) {
     case undefined:
       return null;
+    case "serve":
+      return (await import("./http")).serveHttp();
     case "login":
       return login();
     case "logout":

@@ -92,6 +92,33 @@ claude mcp add cosmos -- bun run /absolute/path/to/cosmos-mcp/index.ts
 
 Use absolute paths: MCP clients do not reliably resolve relative ones. A local clone reads `.env`, so you can leave `env` out of the client config.
 
+### Docker Compose (Streamable HTTP)
+
+To run the server in a self-contained container over MCP Streamable HTTP (`http://127.0.0.1:3000/mcp`):
+
+```bash
+docker compose up -d --build
+```
+
+Point your MCP client at the Streamable HTTP endpoint:
+
+```json
+{
+  "mcpServers": {
+    "cosmos": {
+      "url": "http://127.0.0.1:3000/mcp"
+    }
+  }
+}
+```
+
+Pass `COSMOS_AUTHORIZATION` via `.env`, or sign in directly inside the isolated `cosmos-config` volume:
+
+```bash
+docker compose run --rm cosmos-mcp login
+docker compose restart cosmos-mcp
+```
+
 ## Authentication
 
 Skip this until you want to save something. Every tool without an **A** in the [Tools](#tools) tables works right now.

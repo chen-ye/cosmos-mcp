@@ -1,0 +1,42 @@
+services:
+  cosmos-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["serve"]
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${COSMOS_BIND_HOST:-127.0.0.1}:${PORT:-3000}:3000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "3000"
+      XDG_CONFIG_HOME: "/data/config"
+      COSMOS_AUTHORIZATION: "${COSMOS_AUTHORIZATION:-}"
+      COSMOS_COOKIE: "${COSMOS_COOKIE:-}"
+      COSMOS_USER_ID: "${COSMOS_USER_ID:-}"
+      COSMOS_ENDPOINT: "${COSMOS_ENDPOINT:-}"
+      COSMOS_TIMEOUT_MS: "${COSMOS_TIMEOUT_MS:-}"
+      COSMOS_CLIENT_NAME: "${COSMOS_CLIENT_NAME:-}"
+      COSMOS_USER_AGENT: "${COSMOS_USER_AGENT:-}"
+    volumes:
+      - cosmos-config:/data/config
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - cosmos-net
+
+volumes:
+  cosmos-config:
+
+networks:
+  cosmos-net:
+    driver: bridge
