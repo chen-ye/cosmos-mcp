@@ -14,7 +14,6 @@ export const SIGNED_OUT_TOOLS = [
   "cosmos_whoami",
   "cosmos_search",
   "cosmos_search_clusters",
-  "cosmos_search_users",
   "cosmos_search_all",
   "cosmos_explore",
   "cosmos_similar_elements",
@@ -36,13 +35,15 @@ export const SIGNED_OUT_TOOLS = [
  *
  * `cosmos_cluster_recommendations` belongs here despite reading nothing
  * personal: `clusterRecommendations` rejects anonymous callers outright.
+ * `cosmos_search_users` belongs here because Cosmos now gates `search.users`
+ * behind authentication.
  * `cosmos_list_user_clusters` is deliberately absent — it degrades to a partial
  * public list rather than failing, so it stays usable signed out.
  */
 export const SIGNED_IN_ONLY_TOOLS = [
   "cosmos_visual_search",
+  "cosmos_search_users",
   "cosmos_cluster_recommendations",
-  "cosmos_conversational_search",
   "cosmos_list_my_clusters",
   "cosmos_create_cluster",
   "cosmos_save_elements",
@@ -62,11 +63,22 @@ export const SIGNED_IN_ONLY_TOOLS = [
 ] as const;
 
 /**
+ * Tools whose upstream GraphQL root requires a paid or restricted account
+ * entitlement (free accounts receive a `forbidden` error). Registered so
+ * eligible accounts can call them, but excluded from `toolsAvailableNow`
+ * in `cosmos_whoami` by default.
+ */
+export const RESTRICTED_TOOLS = [
+  "cosmos_conversational_search",
+] as const;
+
+/**
  * Tools whose results improve once signed in, but which still work without a
  * credential. Worth calling out so an agent does not treat a thin result as
  * the whole truth.
  */
 export const BETTER_SIGNED_IN = [
+  "cosmos_search_all",
   "cosmos_list_user_clusters",
   "cosmos_suggested_searches",
 ] as const;

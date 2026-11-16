@@ -95,19 +95,28 @@ describe("credentialSummary", () => {
 describe("signedOutPayload", () => {
   const cred = credentialSummary({});
 
-  test("missing credential points at COSMOS_COOKIE", () => {
+  test("missing credential points at COSMOS_AUTHORIZATION", () => {
     const p = signedOutPayload(cred, "missing");
     expect(p.authenticated).toBe(false);
     expect(p.reason).toBe("missing");
-    expect(p.howToFix).toContain("COSMOS_COOKIE");
+    expect(p.howToFix).toContain("COSMOS_AUTHORIZATION");
     expect(p.toolsAvailableNow).toContain("cosmos_search");
     expect(p.toolsRequiringSignIn).toContain("cosmos_save_elements");
+    expect(p.toolsRestricted).toContain("cosmos_conversational_search");
   });
 
-  test("rejected credential says so explicitly", () => {
-    const p = signedOutPayload(cred, "rejected");
+  test("rejected authorization credential calls out COSMOS_AUTHORIZATION expiry", () => {
+    const p = signedOutPayload(credentialSummary({ authorization: "Bearer old" }), "rejected");
     expect(p.summary).toContain("rejected");
+    expect(p.howToFix).toContain("COSMOS_AUTHORIZATION");
+    expect(p.howToFix).toContain("expired");
     expect(p.toolsRequiringSignIn).not.toContain("cosmos_search");
+  });
+
+  test("rejected cookie credential reminds caller about AWSALB cookies", () => {
+    const p = signedOutPayload(credentialSummary({ cookie: "AWSALB=1" }), "rejected");
+    expect(p.howToFix).toContain("AWSALB");
+    expect(p.howToFix).toContain("COSMOS_AUTHORIZATION");
   });
 });
 
@@ -133,7 +142,7 @@ describe("cosmos_whoami", () => {
     const p = payloadOf(result);
     expect(p.authenticated).toBe(false);
     expect(p.reason).toBe("missing");
-    expect(p.howToFix).toContain("COSMOS_COOKIE");
+    expect(p.howToFix).toContain("COSMOS_AUTHORIZATION");
     expect(p.toolsAvailableNow.length).toBeGreaterThan(0);
   });
 
@@ -163,6 +172,8 @@ describe("cosmos_whoami", () => {
     });
     expect(p.library).toEqual({ clusterCount: 3, elementCount: 18 });
     expect(p.credential.cookieConfigured).toBe(true);
+    expect(p.toolsAvailableNow).not.toContain("cosmos_conversational_search");
+    expect(p.toolsRestricted).toEqual(["cosmos_conversational_search"]);
     expect(calls[0]!.op).toBe("CosmosMcpProfileCounts");
     expect(calls[0]!.vars).toEqual({ userId: 100000001 });
   });

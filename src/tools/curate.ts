@@ -3,7 +3,7 @@
  * once you are signed in.
  *
  * Every tool here calls `requireViewer()` first so a signed-out caller gets the
- * actionable "set COSMOS_COOKIE" message instead of a raw GraphQL failure.
+ * actionable "set COSMOS_AUTHORIZATION" message instead of a raw GraphQL failure.
  *
  * Vocabulary: an *element* is a saved image/video/product; a *cluster* is a
  * board. An element can live in many clusters at once — Cosmos calls those
@@ -270,11 +270,8 @@ export const ACTIVITY_QUERY = /* GraphQL */ `
             id
             username
           }
-          element {
+          elementTile {
             id
-            image {
-              url
-            }
           }
         }
         ... on UserConnectedElementToCollaborativeClusterAggregatableActivity {
@@ -562,7 +559,7 @@ export function normalizeActivity(a: any): Activity | null {
     text: describeActivity(a),
     actor: actorOf(a),
     cluster: clusterRefOf(a),
-    elementId: a.element?.id ?? null,
+    elementId: a.elementTile?.id ?? null,
   };
 }
 
@@ -627,7 +624,7 @@ Use it to resolve a board the user names in prose ("the kitchen renovation board
 
 Returns each cluster with its id, name, privacy, element count, cover image and cosmos.so URL, plus any subclusters (a board nested inside a board).
 
-Read-only, one request per page. Requires COSMOS_COOKIE — call cosmos_whoami first if unsure.`,
+Read-only, one request per page. Requires COSMOS_AUTHORIZATION — call cosmos_whoami first if unsure.`,
       inputSchema: {
         search: z
           .string()

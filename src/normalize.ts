@@ -23,7 +23,7 @@ export interface NormalizedMedia {
 
 export interface NormalizedElement {
   id: number;
-  type: "media" | "product" | "unknown";
+  type: "media" | "product" | "text" | "website" | "unknown";
   /** Permalink on cosmos.so. */
   url: string;
   /** Cosmos' own generated description, with its `<n>` entity markers stripped. */
@@ -37,6 +37,10 @@ export interface NormalizedElement {
   /** Populated only for carousel elements. */
   additionalMedia?: NormalizedMedia[];
   product?: { title: string | null; brand: string | null; description: string | null; price: string | null };
+  /** Populated only for text elements. */
+  text?: string | null;
+  /** Populated only for website/link elements. */
+  website?: { title: string | null; description: string | null };
 }
 
 export interface NormalizedCluster {
@@ -133,16 +137,31 @@ function formatPrice(p: any): string | null {
   return p.currency ? `${p.value} ${p.currency}` : String(p.value);
 }
 
+function elementType(typename: string | undefined): NormalizedElement["type"] {
+  switch (typename) {
+    case "MediaElementTile":
+      return "media";
+    case "ProductElementTile":
+      return "product";
+    case "TextElementTile":
+      return "text";
+    case "WebsiteElementTile":
+      return "website";
+    default:
+      return "unknown";
+  }
+}
+
 export function normalizeElement(e: any, previewWidth = 400): NormalizedElement | null {
   if (!e?.id) return null;
-  const isProduct = e.__typename === "ProductElementTile";
+  const type = elementType(e.__typename);
   const extra = Array.isArray(e.multipleMedia)
     ? e.multipleMedia.map((m: any) => normalizeMedia(m, previewWidth)).filter(Boolean)
     : [];
 
   return {
     id: e.id,
-    type: isProduct ? "product" : e.__typename === "MediaElementTile" ? "media" : "unknown",
+    type,
     url: e.shareUrl ?? `${SITE}/e/${e.id}`,
     caption: stripCaptionMarkup(e.generatedCaption?.text),
     owner: { id: e.ownerId, username: e.owner?.username ?? null },
@@ -157,13 +176,22 @@ export function normalizeElement(e: any, previewWidth = 400): NormalizedElement 
       : null,
     media: normalizeMedia(e.media, previewWidth),
     ...(extra.length > 0 ? { additionalMedia: extra as NormalizedMedia[] } : {}),
-    ...(isProduct
+    ...(type === "product"
       ? {
           product: {
             title: e.productTitle ?? null,
             brand: e.productBrand ?? null,
             description: e.productDescription ?? null,
             price: formatPrice(e.productPrice),
+          },
+        }
+      : {}),
+    ...(type === "text" ? { text: e.text ?? null } : {}),
+    ...(type === "website"
+      ? {
+          website: {
+            title: e.websiteTitle ?? null,
+            description: e.websiteDescription ?? null,
           },
         }
       : {}),

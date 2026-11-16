@@ -3,7 +3,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../src/server";
 import { loadConfig } from "../src/config";
-import { SIGNED_OUT_TOOLS, SIGNED_IN_ONLY_TOOLS, BETTER_SIGNED_IN } from "../src/tools/catalog";
+import { BETTER_SIGNED_IN, RESTRICTED_TOOLS, SIGNED_IN_ONLY_TOOLS, SIGNED_OUT_TOOLS } from "../src/tools/catalog";
 
 /**
  * `cosmos_whoami` tells an agent which tools it can use before signing in. That
@@ -25,7 +25,7 @@ async function registeredToolNames(): Promise<string[]> {
 
 test("every registered tool is classified in the catalog", async () => {
   const registered = await registeredToolNames();
-  const classified = new Set<string>([...SIGNED_OUT_TOOLS, ...SIGNED_IN_ONLY_TOOLS]);
+  const classified = new Set<string>([...SIGNED_OUT_TOOLS, ...SIGNED_IN_ONLY_TOOLS, ...RESTRICTED_TOOLS]);
 
   const unclassified = registered.filter((name) => !classified.has(name));
   expect(unclassified).toEqual([]);
@@ -34,16 +34,19 @@ test("every registered tool is classified in the catalog", async () => {
 test("every catalog entry is a tool the server actually registers", async () => {
   const registered = new Set(await registeredToolNames());
 
-  const phantom = [...SIGNED_OUT_TOOLS, ...SIGNED_IN_ONLY_TOOLS, ...BETTER_SIGNED_IN].filter(
+  const phantom = [...SIGNED_OUT_TOOLS, ...SIGNED_IN_ONLY_TOOLS, ...RESTRICTED_TOOLS, ...BETTER_SIGNED_IN].filter(
     (name) => !registered.has(name),
   );
   expect(phantom).toEqual([]);
 });
 
-test("no tool is classified as both signed-out and signed-in-only", () => {
+test("no tool appears in more than one catalog bucket", () => {
   const signedOut = new Set<string>(SIGNED_OUT_TOOLS);
-  const overlap = SIGNED_IN_ONLY_TOOLS.filter((name) => signedOut.has(name));
-  expect(overlap).toEqual([]);
+  const signedIn = new Set<string>(SIGNED_IN_ONLY_TOOLS);
+  const restricted = new Set<string>(RESTRICTED_TOOLS);
+  expect(SIGNED_IN_ONLY_TOOLS.filter((name) => signedOut.has(name))).toEqual([]);
+  expect(RESTRICTED_TOOLS.filter((name) => signedOut.has(name) || signedIn.has(name))).toEqual([]);
+  expect(restricted.size).toBe(RESTRICTED_TOOLS.length);
 });
 
 test("tools that merely degrade signed out are listed as available, not gated", () => {

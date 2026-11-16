@@ -45,8 +45,9 @@ export class CosmosError extends Error {
 }
 
 const AUTH_HINT =
-  "Set COSMOS_COOKIE to the `Cookie` header from a signed-in cosmos.so browser " +
-  "session (DevTools > Network > any api.cosmos.so request > Request Headers). " +
+  "Set COSMOS_AUTHORIZATION to the `Authorization` header (starts with `Bearer `) from a signed-in " +
+  "cosmos.so browser session (DevTools > Network > any api.cosmos.so request > Request Headers), or run " +
+  "`cosmos-mcp login`. Do not use the `Cookie` header (`AWSALB` cookies alone do not sign you in). " +
   "Browsing and search work without it; saving and collections do not.";
 
 /** Maps a GraphQL error code plus HTTP status onto a `CosmosErrorKind`. */

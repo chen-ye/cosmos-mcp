@@ -187,7 +187,7 @@ const SEARCH_USERS = /* GraphQL */ `
  *    needs the `items { searchTerm }` sub-selection.
  */
 const SEARCH_ALL = /* GraphQL */ `
-  query CosmosMcpSearchAll($searchTerm: String!, $pageSize: Int) {
+  query CosmosMcpSearchAll($searchTerm: String!, $pageSize: Int, $includeUsers: Boolean!) {
     search(searchTerm: $searchTerm) {
       clusters(meta: { pageSize: $pageSize }) {
         items {
@@ -211,7 +211,7 @@ const SEARCH_ALL = /* GraphQL */ `
           count
         }
       }
-      users(meta: { pageSize: $pageSize }) {
+      users(meta: { pageSize: $pageSize }) @include(if: $includeUsers) {
         items {
           ${SEARCH_USER_SELECTION}
         }
@@ -382,12 +382,24 @@ const ELEMENT_PREVIEW = /* GraphQL */ `
       ...MediaCore
     }
   }
+  ... on TextElementTile {
+    text
+  }
+  ... on WebsiteElementTile {
+    media {
+      ...MediaCore
+    }
+    websiteTitle: title
+    websiteDescription: description
+  }
 `;
 
 /**
  * Selection shared by the two board roots, so `category` changes only which root
- * answers. `topElements` returns a bare list, not a paged connection, and its
- * `elementCount` argument is `UInt!` — an `Int!` variable is rejected outright.
+ * answers. `topElements` returns a bare list, not a paged connection, its
+ * `elementCount` argument is `UInt!` (an `Int!` variable is rejected outright),
+ * and Cosmos rejects `elementCount: 0` with `'Page Size' must be greater than '0'`,
+ * so `previewCount: 0` skips `topElements` via `@include(if: $includePreviews)`.
  */
 const BOARD_SELECTION = /* GraphQL */ `
   ...ClusterCore
@@ -396,13 +408,18 @@ const BOARD_SELECTION = /* GraphQL */ `
     name
     slug
   }
-  topElements(elementCount: $previewCount) {
+  topElements(elementCount: $previewCount) @include(if: $includePreviews) {
     ${ELEMENT_PREVIEW}
   }
 `;
 
 const FEATURED_CLUSTERS = /* GraphQL */ `
-  query CosmosMcpFeaturedClusters($pageSize: Int, $pageCursor: String, $previewCount: UInt!) {
+  query CosmosMcpFeaturedClusters(
+    $pageSize: Int
+    $pageCursor: String
+    $previewCount: UInt!
+    $includePreviews: Boolean!
+  ) {
     featuredClusters(meta: { pageSize: $pageSize, pageCursor: $pageCursor }) {
       items {
         ${BOARD_SELECTION}
@@ -424,6 +441,7 @@ const CATEGORY_CLUSTERS = /* GraphQL */ `
     $pageSize: Int
     $pageCursor: String
     $previewCount: UInt!
+    $includePreviews: Boolean!
   ) {
     categoryClusters(categoryId: $categoryId, meta: { pageSize: $pageSize, pageCursor: $pageCursor }) {
       items {
@@ -1157,6 +1175,111 @@ export function interleaveSimilar(
   return merged;
 }
 
+/**
+ * Reads pixel dimensions from PNG, GIF, WebP, or JPEG headers without external
+ * dependencies. Returns null if the buffer is truncated or unrecognized.
+ */
+export function inspectImageDimensions(
+  bytes: Buffer,
+  mimeType: string,
+): { width: number; height: number } | null {
+  if (mimeType === "image/png") {
+    if (bytes.length < 24) return null;
+    if (bytes.readUInt32BE(0) !== 0x89504e47 || bytes.toString("ascii", 12, 16) !== "IHDR") return null;
+    const width = bytes.readUInt32BE(16);
+    const height = bytes.readUInt32BE(20);
+    return width > 0 && height > 0 ? { width, height } : null;
+  }
+
+  if (mimeType === "image/gif") {
+    if (bytes.length < 10) return null;
+    const sig = bytes.toString("ascii", 0, 6);
+    if (sig !== "GIF87a" && sig !== "GIF89a") return null;
+    const width = bytes.readUInt16LE(6);
+    const height = bytes.readUInt16LE(8);
+    return width > 0 && height > 0 ? { width, height } : null;
+  }
+
+  if (mimeType === "image/webp") {
+    if (bytes.length < 25 || bytes.toString("ascii", 0, 4) !== "RIFF" || bytes.toString("ascii", 8, 12) !== "WEBP") {
+      return null;
+    }
+    const chunk = bytes.toString("ascii", 12, 16);
+    if (chunk === "VP8 " && bytes.length >= 30 && bytes[23] === 0x9d && bytes[24] === 0x01 && bytes[25] === 0x2a) {
+      const width = bytes.readUInt16LE(26) & 0x3fff;
+      const height = bytes.readUInt16LE(28) & 0x3fff;
+      return width > 0 && height > 0 ? { width, height } : null;
+    }
+    if (chunk === "VP8L" && bytes.length >= 25 && bytes[20] === 0x2f) {
+      const bits = bytes.readUInt32LE(21);
+      const width = (bits & 0x3fff) + 1;
+      const height = ((bits >> 14) & 0x3fff) + 1;
+      return width > 0 && height > 0 ? { width, height } : null;
+    }
+    if (chunk === "VP8X" && bytes.length >= 30) {
+      const width = 1 + (bytes[24]! | (bytes[25]! << 8) | (bytes[26]! << 16));
+      const height = 1 + (bytes[27]! | (bytes[28]! << 8) | (bytes[29]! << 16));
+      return width > 0 && height > 0 ? { width, height } : null;
+    }
+    return null;
+  }
+
+  if (mimeType === "image/jpeg") {
+    if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return null;
+    let offset = 2;
+    while (offset + 3 < bytes.length) {
+      if (bytes[offset] !== 0xff) break;
+      while (offset < bytes.length && bytes[offset] === 0xff) offset++;
+      if (offset >= bytes.length) break;
+      const marker = bytes[offset++]!;
+      if (marker === 0xd9 || marker === 0xda) break; // EOI or SOS
+      if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue; // standalone markers
+      if (offset + 2 > bytes.length) break;
+      const segLen = bytes.readUInt16BE(offset);
+      if (segLen < 2 || offset + segLen > bytes.length) break;
+      const isSof =
+        (marker >= 0xc0 && marker <= 0xc3) ||
+        (marker >= 0xc5 && marker <= 0xc7) ||
+        (marker >= 0xc9 && marker <= 0xcb) ||
+        (marker >= 0xcd && marker <= 0xcf);
+      if (isSof && offset + 7 <= bytes.length) {
+        const height = bytes.readUInt16BE(offset + 3);
+        const width = bytes.readUInt16BE(offset + 5);
+        return width > 0 && height > 0 ? { width, height } : null;
+      }
+      offset += segLen;
+    }
+    return null;
+  }
+
+  return null;
+}
+
+const MIN_VISUAL_SEARCH_EDGE_PX = 300;
+const MAX_VISUAL_SEARCH_ASPECT = 2.5;
+
+export function visualSearchWarnings(
+  itemCount: number,
+  dimensions: { width: number; height: number } | null,
+): string[] {
+  if (itemCount > 0 || !dimensions) return [];
+  const { width, height } = dimensions;
+  const warnings: string[] = [];
+  if (width < MIN_VISUAL_SEARCH_EDGE_PX || height < MIN_VISUAL_SEARCH_EDGE_PX) {
+    warnings.push(
+      `Uploaded image is ${width}x${height}px; Cosmos visual search may silently return 0 results for small images or tight crops (< ${MIN_VISUAL_SEARCH_EDGE_PX}px). Try a larger or less tightly cropped image, or add a \`query\` phrase.`,
+    );
+  } else {
+    const ratio = Math.max(width / height, height / width);
+    if (ratio > MAX_VISUAL_SEARCH_ASPECT) {
+      warnings.push(
+        `Uploaded image has an extreme aspect ratio (${width}x${height}px); Cosmos visual search may silently return 0 results for narrow/wide strips. Try a closer-to-square crop or add a \`query\` phrase.`,
+      );
+    }
+  }
+  return warnings;
+}
+
 // ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
@@ -1259,8 +1382,8 @@ export const registerBrowseTools: ToolRegistrar = (server, ctx) => {
         "bytes to Cosmos's ephemeral `search/` S3 bucket via `s3PostPolicyForVisualSearch` — without " +
         "saving anything to the user's library — and queries `searchElements(search: { image, text })`. " +
         "Pass an optional `query` phrase to combine visual similarity with a text refinement, or filter " +
-        "by `contentType` and `color`. Requires a configured credential (`COSMOS_AUTHORIZATION` or " +
-        "`COSMOS_COOKIE`).",
+        "by `contentType` and `color`. Small crops (< ~300px) or extreme aspect ratios may silently return 0 " +
+        "results from Cosmos's visual search index. Requires `COSMOS_AUTHORIZATION` (or `COSMOS_COOKIE`).",
       inputSchema: {
         imageBase64: z
           .string()
@@ -1352,10 +1475,18 @@ export const registerBrowseTools: ToolRegistrar = (server, ctx) => {
         buildVisualSearchVariables(policy.uploadKey, args),
       );
       const page = elementPage(data.searchElements, previewWidth);
+      const dimensions = inspectImageDimensions(bytes, args.mimeType);
+      const warnings = visualSearchWarnings(page.items.length, dimensions);
       const label = args.query ? `visual search + ${JSON.stringify(args.query)}` : "visual search";
       return ok(
-        `${page.items.length} result(s) for ${label} of ${page.totalCount ?? "?"} total.`,
-        { uploadKey: policy.uploadKey, ...page },
+        `${page.items.length} result(s) for ${label} of ${page.totalCount ?? "?"} total.` +
+          (warnings.length > 0 ? ` ${warnings[0]}` : ""),
+        {
+          uploadKey: policy.uploadKey,
+          ...page,
+          ...(dimensions ? { imageDimensions: dimensions } : {}),
+          ...(warnings.length > 0 ? { warnings } : {}),
+        },
       );
     }),
   );
@@ -1380,7 +1511,7 @@ export const registerBrowseTools: ToolRegistrar = (server, ctx) => {
           .optional()
           .describe(
             "Restrict to one owner's collections. Cosmos rejects this filter for signed-out callers, " +
-              "so it needs COSMOS_COOKIE; omit it for a site-wide search.",
+              "so it needs COSMOS_AUTHORIZATION; omit it for a site-wide search.",
           ),
         cursor: cursorArg,
         limit: limitArg,
@@ -1415,7 +1546,7 @@ export const registerBrowseTools: ToolRegistrar = (server, ctx) => {
         "when you want to mine a curator's taste and only have their name. Cosmos matches handles and " +
         "display names, not bios, so a partial handle works better than a description. Follow a hit with " +
         "cosmos_get_user for the bio and links, or cosmos_list_user_clusters for their boards. Search " +
-        "results carry no bio or website — those fields are simply absent from this index.",
+        "results carry no bio or website — those fields are simply absent from this index. Requires COSMOS_AUTHORIZATION.",
       inputSchema: {
         query: z.string().min(1).describe("Name or handle to look for."),
         cursor: cursorArg,
@@ -1426,6 +1557,7 @@ export const registerBrowseTools: ToolRegistrar = (server, ctx) => {
     },
     guard(async (args: { query: string; cursor?: string; limit?: number; previewWidth?: number }) => {
       const previewWidth = Math.min(args.previewWidth ?? DEFAULT_PREVIEW_WIDTH, 200);
+      await client.requireViewer("cosmos_search_users");
       const data = await client.request<{ search: any }>("CosmosMcpSearchUsers", SEARCH_USERS, {
         searchTerm: args.query,
         ...pageVars(args.cursor, args.limit),
@@ -1465,9 +1597,11 @@ export const registerBrowseTools: ToolRegistrar = (server, ctx) => {
     guard(async (args: { query: string; limit?: number; previewWidth?: number }) => {
       const previewWidth = args.previewWidth ?? DEFAULT_PREVIEW_WIDTH;
       const limit = args.limit ?? 5;
+      const includeUsers = (await optionalViewerId(client)) !== null;
       const data = await client.request<{ search: any }>("CosmosMcpSearchAll", SEARCH_ALL, {
         searchTerm: args.query,
         pageSize: limit,
+        includeUsers,
       });
       const result = data.search ?? {};
 
@@ -1491,10 +1625,12 @@ export const registerBrowseTools: ToolRegistrar = (server, ctx) => {
 
       return ok(
         `${JSON.stringify(args.query)}: ${clusters.totalCount ?? "?"} collection(s), ` +
-          `${users.totalCount ?? "?"} profile(s), ${elementTotal} element(s).`,
+          `${includeUsers ? (users.totalCount ?? "?") : "signed-out (omitted)"} profile(s), ${elementTotal} element(s).`,
         {
           clusters: section(clusters),
-          users: section(users),
+          users: includeUsers
+            ? section(users)
+            : { ...section(users), note: "People search requires signing in (COSMOS_AUTHORIZATION)." },
           elements: { ...section(allElements, true), totalCount: elementTotal },
           suggestions,
           note:
@@ -1676,15 +1812,13 @@ export const registerBrowseTools: ToolRegistrar = (server, ctx) => {
   server.registerTool(
     "cosmos_conversational_search",
     {
-      title: "Search by brief (experimental)",
+      title: "Search by brief (gated upstream)",
       description:
         "Hands Cosmos a natural-language brief and gets back both a flat result set and several named " +
-        "visual DIRECTIONS, each with its own images. It is the only endpoint here that returns grouped, " +
-        "labelled results, which is the exact shape of a moodboard pitch: 'warm minimalist Japanese " +
-        "interiors, but not sterile' comes back as three or four distinct angles you can put on separate " +
-        "slides. EXPERIMENTAL: this response has never been observed — it is gated behind a session, so " +
-        "only the query was verified, not the payload. Treat a thin or oddly shaped result as the tool's " +
-        "fault, check `warnings`, and fall back to cosmos_search. Requires COSMOS_COOKIE.",
+        "visual DIRECTIONS, each with its own images. " +
+        "GATED UPSTREAM: Cosmos restricts `conversationalSearch` behind a paid/eligible account tier " +
+        "(standard free accounts receive a `forbidden` error such as `You do not have any admin privileges.`). " +
+        "Prefer `cosmos_search` and `cosmos_browse_boards` if your account does not have access. Requires COSMOS_AUTHORIZATION.",
       inputSchema: {
         brief: z
           .string()
@@ -1711,11 +1845,28 @@ export const registerBrowseTools: ToolRegistrar = (server, ctx) => {
     guard(async (args: { brief: string; limit?: number; perDirection?: number; previewWidth?: number }) => {
       const previewWidth = args.previewWidth ?? DEFAULT_PREVIEW_WIDTH;
       await client.requireViewer("cosmos_conversational_search");
-      const data = await client.request<{ conversationalSearch: any }>(
-        "CosmosMcpConversationalSearch",
-        CONVERSATIONAL_SEARCH,
-        { messages: [{ role: "user", content: args.brief }] },
-      );
+      let data: { conversationalSearch: any };
+      try {
+        data = await client.request<{ conversationalSearch: any }>(
+          "CosmosMcpConversationalSearch",
+          CONVERSATIONAL_SEARCH,
+          { messages: [{ role: "user", content: args.brief }] },
+        );
+      } catch (err) {
+        if (err instanceof CosmosError && err.kind === "forbidden") {
+          throw new CosmosError(
+            `${err.message} Cosmos gates conversationalSearch behind a paid/restricted account tier; use cosmos_search or cosmos_browse_boards instead.`,
+            {
+              kind: "forbidden",
+              status: err.status,
+              operation: err.operation,
+              graphQLErrors: err.graphQLErrors,
+              cause: err,
+            },
+          );
+        }
+        throw err;
+      }
       const result = normalizeConversationalSearch(data.conversationalSearch, {
         previewWidth,
         limit: args.limit,
@@ -1814,8 +1965,10 @@ export const registerBrowseTools: ToolRegistrar = (server, ctx) => {
         previewWidth?: number;
       }) => {
         const previewWidth = args.previewWidth ?? DEFAULT_PREVIEW_WIDTH;
-        const previewCount = args.previewCount ?? 3;
-        const vars = { ...pageVars(args.cursor, args.limit), previewCount };
+        const requestedPreviewCount = args.previewCount ?? 3;
+        const includePreviews = requestedPreviewCount > 0;
+        const previewCount = includePreviews ? requestedPreviewCount : 1;
+        const vars = { ...pageVars(args.cursor, args.limit), previewCount, includePreviews };
         const data = args.category
           ? await client.request<{ categoryClusters: any }>("CosmosMcpCategoryClusters", CATEGORY_CLUSTERS, {
               categoryId: args.category,
@@ -2014,11 +2167,18 @@ export const registerBrowseTools: ToolRegistrar = (server, ctx) => {
         slug: s.slug ?? null,
         elementCount: s.numberOfElements ?? null,
       }));
-      return ok(`Cluster ${cluster.id} "${cluster.name}" (${cluster.elementCount ?? "?"} elements).`, {
+      const connectionCount: number | null = data.clusterConnections?.meta?.count ?? null;
+      const elementCount =
+        connectionCount != null &&
+        (cluster.elementCount == null || subClusters.length === 0 || connectionCount > cluster.elementCount)
+          ? connectionCount
+          : cluster.elementCount;
+      return ok(`Cluster ${cluster.id} "${cluster.name}" (${elementCount ?? "?"} elements).`, {
         cluster: {
           ...cluster,
+          elementCount,
           followers: data.cluster.followersCount ?? null,
-          connectionCount: data.clusterConnections?.meta?.count ?? null,
+          connectionCount,
         },
         subClusters,
       });
@@ -2032,7 +2192,7 @@ export const registerBrowseTools: ToolRegistrar = (server, ctx) => {
       description:
         "Pages through the elements saved in a collection, newest first. This is how you actually read a " +
         "moodboard someone else built — pair it with cosmos_spotlights or cosmos_get_user to find boards " +
-        "worth reading. Public clusters work signed out; private ones need COSMOS_COOKIE.",
+        "worth reading. Public clusters work signed out; private ones need COSMOS_AUTHORIZATION.",
       inputSchema: {
         clusterId: z.number().int().positive().describe("Numeric cluster id, from cosmos_get_cluster or a listing."),
         cursor: cursorArg,
@@ -2100,7 +2260,7 @@ export const registerBrowseTools: ToolRegistrar = (server, ctx) => {
       description:
         "The collections on a profile. Omit `username` to list the signed-in viewer's own boards — that " +
         "is how you find the cluster id to save into. Cosmos gates the full list behind a session; " +
-        "without COSMOS_COOKIE a named profile still returns the three collections it leads with, " +
+        "without COSMOS_AUTHORIZATION a named profile still returns the three collections it leads with, " +
         "flagged as partial.",
       inputSchema: {
         username: z.string().optional().describe("Profile handle. Omit to use the signed-in viewer."),
@@ -2134,7 +2294,7 @@ export const registerBrowseTools: ToolRegistrar = (server, ctx) => {
           nextCursor: null,
           totalCount: data.user?.topClusters?.meta?.count ?? null,
           partial: true,
-          note: "Cosmos only exposes a profile's leading collections to signed-out callers. Set COSMOS_COOKIE for the full, pageable list.",
+          note: "Cosmos only exposes a profile's leading collections to signed-out callers. Set COSMOS_AUTHORIZATION for the full, pageable list.",
         });
       }
     }),

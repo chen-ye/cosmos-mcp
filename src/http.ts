@@ -51,9 +51,11 @@ function jsonRpcError(
  * All sessions share one `CosmosClient` so viewer identity lookups stay cached.
  */
 export function createHttpHandler(
-  config: CosmosConfig = loadConfig(),
-  client: CosmosClient = new CosmosClient(config),
+  config?: CosmosConfig,
+  client?: CosmosClient,
 ): HttpSessionHandler {
+  const resolvedConfig = config ?? loadConfig();
+  const resolvedClient = client ?? new CosmosClient(resolvedConfig, config ? undefined : () => loadConfig());
   const sessions = new Map<string, ActiveSession>();
 
   async function handleMcp(req: Request): Promise<Response> {
@@ -74,7 +76,7 @@ export function createHttpHandler(
       return jsonRpcError(400, -32000, "Bad Request: Mcp-Session-Id header is required");
     }
 
-    const server = createServer(config, client);
+    const server = createServer(resolvedConfig, resolvedClient);
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => crypto.randomUUID(),
       onsessioninitialized: (id) => {
@@ -134,9 +136,10 @@ export function createHttpHandler(
 
 export async function serveHttp(env: NodeJS.ProcessEnv = process.env): Promise<number> {
   const config = loadConfig(env);
+  const client = new CosmosClient(config, () => loadConfig(env));
   const hostname = env.HOST?.trim() || DEFAULT_HTTP_HOST;
   const port = parsePort(env.PORT);
-  const handler = createHttpHandler(config);
+  const handler = createHttpHandler(config, client);
 
   const server = Bun.serve({
     hostname,

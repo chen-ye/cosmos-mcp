@@ -53,7 +53,7 @@ function harness(opts: {
     async requireViewer(operation: string) {
       if (opts.viewer) return opts.viewer;
       throw new CosmosError(
-        `${operation}: not signed in. Set COSMOS_COOKIE to the \`Cookie\` header from a signed-in cosmos.so browser session.`,
+        `${operation}: not signed in. Set COSMOS_AUTHORIZATION to the \`Authorization\` header from a signed-in cosmos.so browser session.`,
         { kind: "unauthenticated", operation },
       );
     },
@@ -256,6 +256,24 @@ describe("activity normalizing", () => {
   test("an unknown union member degrades to its typename instead of throwing", () => {
     expect(describeActivity({ __typename: "SomeFutureActivity" })).toBe("SomeFutureActivity");
     expect(normalizeActivity({ id: 3, __typename: "SomeFutureActivity" })!.text).toBe("SomeFutureActivity");
+  });
+
+  test("UserConnectedYourElementAggregatableActivity reads elementTile.id and formats the count", () => {
+    const a = normalizeActivity({
+      id: 4,
+      isRead: false,
+      createdAt: "2026-11-16T00:00:00Z",
+      __typename: "UserConnectedYourElementAggregatableActivity",
+      numberOfConnections: 3,
+      lastConnectedUser: { id: 88, username: "saver" },
+      elementTile: { id: 999111 },
+    })!;
+    expect(a.type).toBe("UserConnectedYourElementAggregatableActivity");
+    expect(a.elementId).toBe(999111);
+    expect(a.actor).toEqual({ id: 88, username: "saver" });
+    expect(a.text).toBe("@saver and 2 other(s) saved your element");
+    expect(ACTIVITY_QUERY).toContain("elementTile");
+    expect(ACTIVITY_QUERY).not.toMatch(/\belement\s*\{/);
   });
 
   test("import activities mention the source", () => {
@@ -571,6 +589,46 @@ describe("cosmos_my_library", () => {
     expect(p.items[0].media.thumbnailUrl).toContain("w=400");
     expect(p.totalCount).toBe(18);
   });
+
+  test("normalizes TextElementTile and WebsiteElementTile items instead of marking them unknown", async () => {
+    const { tools } = harness({
+      viewer: VIEWER,
+      respond: () => ({
+        allElementsV2: {
+          items: [
+            {
+              __typename: "TextElementTile",
+              id: 2,
+              ownerId: VIEWER.id,
+              owner: { username: "example-user" },
+              shareUrl: "https://www.cosmos.so/e/2",
+              text: "Some saved tweet text",
+              source: { url: "https://x.com/someone/status/123" },
+            },
+            {
+              __typename: "WebsiteElementTile",
+              id: 3,
+              ownerId: VIEWER.id,
+              owner: { username: "example-user" },
+              shareUrl: "https://www.cosmos.so/e/3",
+              websiteTitle: "Post on X",
+              websiteDescription: "Link summary",
+              source: { url: "https://x.com/someone/status/456" },
+              media: { __typename: "StaticImage", mediaId: "w3", url: "https://cdn.cosmos.so/w3", width: 400, height: 200 },
+            },
+          ],
+          meta: { nextPageCursor: null, count: 2 },
+        },
+      }),
+    });
+    const p = payloadOf(await tools.get("cosmos_my_library")!.handler({}));
+    expect(p.items[0].type).toBe("text");
+    expect(p.items[0].text).toBe("Some saved tweet text");
+    expect(p.items[0].source.url).toBe("https://x.com/someone/status/123");
+    expect(p.items[1].type).toBe("website");
+    expect(p.items[1].website).toEqual({ title: "Post on X", description: "Link summary" });
+    expect(p.items[1].media.thumbnailUrl).toContain("w=400");
+  });
 });
 
 describe("cosmos_following_feed", () => {
@@ -694,7 +752,7 @@ describe("signed out", () => {
       expect(result.isError, name).toBe(true);
       const body = JSON.parse((result.content[0] as { text: string }).text);
       expect(body.error, name).toBe("unauthenticated");
-      expect(body.message, name).toContain("COSMOS_COOKIE");
+      expect(body.message, name).toContain("COSMOS_AUTHORIZATION");
     }
     expect(calls).toHaveLength(0);
   });

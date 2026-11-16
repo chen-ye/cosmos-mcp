@@ -2,9 +2,9 @@
  * Runtime configuration for the Cosmos MCP server.
  *
  * Cosmos has no public API and no API keys. The web app authenticates with a
- * session cookie, so that is what we reuse: paste the browser's `Cookie` header
- * into `COSMOS_COOKIE`. Everything readable without signing in keeps working
- * with no configuration at all.
+ * bearer token in the `Authorization` header (`COSMOS_AUTHORIZATION`), or a
+ * full session-bearing `Cookie` header (`COSMOS_COOKIE`). Everything readable
+ * without signing in keeps working with no configuration at all.
  */
 
 import { readFileSync } from "node:fs";
@@ -19,10 +19,15 @@ export interface CosmosConfig {
   /** Raw `Authorization` header value, if the account uses bearer tokens. */
   authorization?: string;
   /**
-   * Skips the `me` lookup when set. Useful when the session cookie works but
-   * you would rather not spend a round trip resolving the viewer.
+   * Skips the `me` lookup when set. Useful when the credential works but you
+   * would rather not spend a round trip resolving the viewer.
    */
   userId?: number;
+  /**
+   * Internal flag set by `loadConfig`: only explicit `COSMOS_USER_ID` skips
+   * `CosmosMcpViewer`; `userId` metadata from `config.json` still verifies live.
+   */
+  skipMeLookup?: boolean;
   /** Sent as `x-client-name`; the API rejects unknown clients. */
   clientName: string;
   userAgent: string;
@@ -93,11 +98,17 @@ export function loadConfig(processEnv: NodeJS.ProcessEnv = process.env): CosmosC
   const stored = readAuth(processEnv);
   const read = (key: string): string | undefined => processEnv[key] ?? fileEnv[key];
 
+  const envCookie = read("COSMOS_COOKIE")?.trim() || undefined;
+  const envAuth = read("COSMOS_AUTHORIZATION")?.trim() || undefined;
+  const envUserId = parsePositiveInt(read("COSMOS_USER_ID"), "COSMOS_USER_ID");
+  const usingStoredCred = !envCookie && !envAuth;
+
   return {
     endpoint: read("COSMOS_ENDPOINT")?.trim() || DEFAULT_ENDPOINT,
-    cookie: read("COSMOS_COOKIE")?.trim() || stored.cookie || undefined,
-    authorization: read("COSMOS_AUTHORIZATION")?.trim() || stored.authorization || undefined,
-    userId: parsePositiveInt(read("COSMOS_USER_ID"), "COSMOS_USER_ID") ?? stored.userId,
+    cookie: envCookie || stored.cookie || undefined,
+    authorization: envAuth || stored.authorization || undefined,
+    userId: envUserId ?? (usingStoredCred ? stored.userId : undefined),
+    skipMeLookup: envUserId !== undefined,
     clientName: read("COSMOS_CLIENT_NAME")?.trim() || DEFAULT_CLIENT_NAME,
     userAgent: read("COSMOS_USER_AGENT")?.trim() || DEFAULT_USER_AGENT,
     timeoutMs: parsePositiveInt(read("COSMOS_TIMEOUT_MS"), "COSMOS_TIMEOUT_MS") ?? DEFAULT_TIMEOUT_MS,

@@ -112,12 +112,15 @@ Point your MCP client at the Streamable HTTP endpoint:
 }
 ```
 
-Pass `COSMOS_AUTHORIZATION` via `.env`, or sign in directly inside the isolated `cosmos-config` volume:
+Pass `COSMOS_AUTHORIZATION` via `.env`, or sign in directly inside the isolated `cosmos-config` volume (leave `COSMOS_AUTHORIZATION` empty in `.env` so the volume credential takes effect and can be refreshed in place without recreating the container):
 
 ```bash
 docker compose run --rm cosmos-mcp login
-docker compose restart cosmos-mcp
+# Or pipe a token into the running container without restarting:
+printf '%s\n' "$COSMOS_AUTHORIZATION" | docker compose exec -T cosmos-mcp bun run index.ts login
 ```
+
+The HTTP server automatically reloads `config.json` from the `cosmos-config` volume on the next request.
 
 ## Authentication
 
@@ -190,12 +193,12 @@ Copy [`.env.example`](.env.example) to `.env` for a documented starting point. N
 | `cosmos_search` | Search every public element by keyword. Filter by content type and colour. | |
 | `cosmos_visual_search` | Reverse-image search from base64 image bytes, with optional text refinement. | A |
 | `cosmos_search_clusters` | Search public collections. Someone has often already built the board you want. | |
-| `cosmos_search_users` | Find people by name or handle. | |
-| `cosmos_search_all` | Search collections, people and elements at once. | |
+| `cosmos_search_users` | Find people by name or handle. | A |
+| `cosmos_search_all` | Search collections, people (when signed in) and elements at once. | |
 | `cosmos_similar_elements` | Give it one image you like; it returns images that look like it. | |
 | `cosmos_element_saved_by` | Which public collections hold an image, and who saved it. Finds people with the taste you want. | |
 | `cosmos_browse_boards` | Browse 800+ curated collections, by category if you pass one. | |
-| `cosmos_conversational_search` | Describe a brief in a sentence; get images grouped into named directions. Experimental. | A |
+| `cosmos_conversational_search` | Describe a brief in a sentence; get images grouped into named directions. Gated upstream (paid/eligible accounts). | A |
 | `cosmos_explore` | The featured feed. Pass a category to narrow it. | |
 | `cosmos_spotlights` | Editorial collections, such as "Rooms Lit Only by Lamps". | |
 | `cosmos_categories` | The 17 subject areas, such as Fashion and Interiors. | |

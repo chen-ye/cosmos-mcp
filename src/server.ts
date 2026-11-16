@@ -88,18 +88,20 @@ cosmos_nest_cluster arranges boards inside boards; cosmos_delete_cluster is
 permanent and needs explicit confirmation.
 
 Browsing, search and public profiles work signed out. Anything that writes, and
-anything touching private or personal data, needs COSMOS_COOKIE configured.`;
+anything touching private or personal data, needs COSMOS_AUTHORIZATION configured.`;
 
 export function createServer(
-  config: CosmosConfig = loadConfig(),
-  client: CosmosClient = new CosmosClient(config),
+  config?: CosmosConfig,
+  client?: CosmosClient,
 ): McpServer {
+  const resolvedConfig = config ?? loadConfig();
+  const resolvedClient = client ?? new CosmosClient(resolvedConfig, config ? undefined : () => loadConfig());
   const server = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
     { instructions: INSTRUCTIONS },
   );
 
-  const ctx: ToolContext = { client };
+  const ctx: ToolContext = { client: resolvedClient };
 
   registerAccountTools(server, ctx);
   registerBrowseTools(server, ctx);

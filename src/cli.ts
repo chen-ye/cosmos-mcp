@@ -11,9 +11,9 @@
 import { loadConfig } from "./config";
 import { CosmosClient } from "./graphql/client";
 import { clearAuth, configPath, readAuth, redact, writeAuth } from "./auth-store";
-import { SIGNED_IN_ONLY_TOOLS, SIGNED_OUT_TOOLS } from "./tools/catalog";
+import { RESTRICTED_TOOLS, SIGNED_IN_ONLY_TOOLS, SIGNED_OUT_TOOLS } from "./tools/catalog";
 
-const TOTAL_TOOLS = SIGNED_OUT_TOOLS.length + SIGNED_IN_ONLY_TOOLS.length;
+const TOTAL_TOOLS = SIGNED_OUT_TOOLS.length + SIGNED_IN_ONLY_TOOLS.length + RESTRICTED_TOOLS.length;
 
 const out = (s = "") => process.stderr.write(s + "\n");
 
@@ -167,7 +167,20 @@ async function login(): Promise<number> {
   out();
   out(`Signed in as @${viewer.username ?? viewer.id}.`);
   out(`Saved to ${path} (owner-only permissions).`);
-  out(`All ${TOTAL_TOOLS} tools are now available. Restart your MCP client to pick this up.`);
+  const envVar = process.env.COSMOS_AUTHORIZATION?.trim()
+    ? "COSMOS_AUTHORIZATION"
+    : process.env.COSMOS_COOKIE?.trim()
+      ? "COSMOS_COOKIE"
+      : null;
+  if (envVar) {
+    out();
+    out(`Note: ${envVar} is currently set in the environment and takes precedence over ${path}.`);
+    out(`Clear ${envVar} in .env or your MCP client config so the newly saved credential is used.`);
+  }
+  out(
+    `All ${SIGNED_OUT_TOOLS.length + SIGNED_IN_ONLY_TOOLS.length} standard tools are now available. ` +
+      "Running HTTP servers pick this up automatically; restart stdio MCP clients if needed.",
+  );
   return 0;
 }
 
@@ -198,7 +211,7 @@ async function status(): Promise<number> {
 
   out();
   out("Checking it against cosmos.so…");
-  const viewer = await new CosmosClient(config).viewer().catch(() => null);
+  const viewer = await new CosmosClient({ ...config, userId: undefined }).viewer().catch(() => null);
   if (viewer) {
     out(`Valid. Signed in as @${viewer.username ?? viewer.id}.`);
     return 0;

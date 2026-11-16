@@ -91,6 +91,16 @@ export const ELEMENT_CORE = /* GraphQL */ `
       productTitle: name
       productDescription: description
     }
+    ... on TextElementTile {
+      text
+    }
+    ... on WebsiteElementTile {
+      media {
+        ...MediaCore
+      }
+      websiteTitle: title
+      websiteDescription: description
+    }
   }
   ${MEDIA_CORE}
 `;

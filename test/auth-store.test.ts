@@ -98,4 +98,19 @@ test("the stored credential is used when nothing higher-precedence is set", () =
   const config = loadConfig(env);
   expect(config.cookie).toBe("stored=1");
   expect(config.userId).toBe(111);
+  expect(config.skipMeLookup).toBe(false);
+});
+
+test("an environment credential does not inherit stored userId and only COSMOS_USER_ID skips me", () => {
+  const env = sandbox();
+  writeAuth({ authorization: "Bearer stored", userId: 111 }, env);
+
+  const overridden = loadConfig({ ...env, COSMOS_AUTHORIZATION: "Bearer fromenv", COSMOS_COOKIE: "", COSMOS_USER_ID: "" });
+  expect(overridden.authorization).toBe("Bearer fromenv");
+  expect(overridden.userId).toBeUndefined();
+  expect(overridden.skipMeLookup).toBe(false);
+
+  const withUserId = loadConfig({ ...env, COSMOS_AUTHORIZATION: "Bearer fromenv", COSMOS_COOKIE: "", COSMOS_USER_ID: "222" });
+  expect(withUserId.userId).toBe(222);
+  expect(withUserId.skipMeLookup).toBe(true);
 });

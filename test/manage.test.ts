@@ -56,7 +56,7 @@ function harness(opts: {
     async requireViewer(operation: string) {
       if (opts.viewer) return opts.viewer;
       throw new CosmosError(
-        `${operation}: not signed in. Set COSMOS_COOKIE to the \`Cookie\` header from a signed-in cosmos.so browser session.`,
+        `${operation}: not signed in. Set COSMOS_AUTHORIZATION to the \`Authorization\` header from a signed-in cosmos.so browser session.`,
         { kind: "unauthenticated", operation },
       );
     },
@@ -328,10 +328,10 @@ describe("tool registration", () => {
  * ------------------------------------------------------------------ */
 
 describe("cosmos_save_url", () => {
-  const created = { id: 900, __typename: "MediaElement", shareUrl: "https://www.cosmos.so/e/900", createdAt: null };
+  const created = { id: 900, __typename: "CreateElementResponse" };
 
-  test("sends exactly one content field and nulls the rest", async () => {
-    const { tools, calls } = harness({ viewer: VIEWER, respond: () => ({ element: { create: created } }) });
+  test("sends createFromUrl with the URL and nulls optional fields", async () => {
+    const { tools, calls } = harness({ viewer: VIEWER, respond: () => ({ element: { createFromUrl: created } }) });
     const p = payloadOf(await tools.get("cosmos_save_url")!.handler({ url: "https://example.com/a.jpg" }));
     expect(calls[0]!.op).toBe("CosmosMcpSaveUrl");
     expect(calls[0]!.query).toBe(SAVE_URL_MUTATION);
@@ -341,16 +341,15 @@ describe("cosmos_save_url", () => {
       sourceUrl: null,
       clusterId: null,
     });
-    expect(calls[0]!.query).not.toContain("text:");
-    expect(calls[0]!.query).not.toContain("image:");
-    expect(calls[0]!.query).not.toContain("videoS3ObjectKey");
+    expect(calls[0]!.query).toContain("createFromUrl");
     expect(p.success).toBe(true);
     expect(p.element.id).toBe(900);
+    expect(p.element.url).toBe("https://www.cosmos.so/e/900");
     expect(p.summary).toContain("unfiled");
   });
 
   test("clusterId and sourceUrl are forwarded when given", async () => {
-    const { tools, calls } = harness({ viewer: VIEWER, respond: () => ({ element: { create: created } }) });
+    const { tools, calls } = harness({ viewer: VIEWER, respond: () => ({ element: { createFromUrl: created } }) });
     const p = payloadOf(
       await tools.get("cosmos_save_url")!.handler({
         url: "https://example.com/a.jpg",
@@ -365,7 +364,7 @@ describe("cosmos_save_url", () => {
   });
 
   test("an element-less response is reported rather than faked", async () => {
-    const { tools } = harness({ viewer: VIEWER, respond: () => ({ element: { create: null } }) });
+    const { tools } = harness({ viewer: VIEWER, respond: () => ({ element: { createFromUrl: null } }) });
     const p = payloadOf(await tools.get("cosmos_save_url")!.handler({ url: "https://example.com/a.jpg" }));
     expect(p.success).toBe(false);
     expect(p.element).toBeNull();
@@ -470,11 +469,15 @@ describe("cosmos_update_cluster", () => {
     expect(calls).toHaveLength(1);
   });
 
-  test("an unconfirmed update is reported, not assumed", async () => {
+  test("an unconfirmed update is reported with empty changes and pre-update cluster state", async () => {
     const { tools } = updateHarness(HAR_CLUSTER, false);
     const p = payloadOf(await tools.get("cosmos_update_cluster")!.handler({ clusterId: 344801244, name: "x" }));
     expect(p.success).toBe(false);
+    expect(p.changes).toEqual([]);
+    expect(p.attemptedChanges).toEqual(['renamed to "x"']);
+    expect(p.cluster.name).toBe("kitchen renovation");
     expect(p.summary).toContain("did not confirm");
+    expect(p.summary).toContain("attempted");
   });
 
   test("the returned cluster reflects the merge, not the pre-update read", async () => {
@@ -727,7 +730,7 @@ describe("signed out", () => {
       expect(result.isError, name).toBe(true);
       const body = JSON.parse((result.content[0] as { text: string }).text);
       expect(body.error, name).toBe("unauthenticated");
-      expect(body.message, name).toContain("COSMOS_COOKIE");
+      expect(body.message, name).toContain("COSMOS_AUTHORIZATION");
     }
     // Nothing was sent — in particular the delete never reached the network.
     expect(calls).toHaveLength(0);

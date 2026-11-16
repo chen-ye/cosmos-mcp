@@ -2,14 +2,15 @@
  * Account tools — "what can I do right now?".
  *
  * Cosmos has no API keys. Everything personal (your library, your boards,
- * saving) rides on a browser session cookie in `COSMOS_COOKIE`. That makes the
- * server's capabilities configuration-dependent, so the first thing an agent
- * should do is ask.
+ * saving) rides on a browser session bearer token in `COSMOS_AUTHORIZATION`
+ * (or a session-bearing `COSMOS_COOKIE`). That makes the server's capabilities
+ * configuration-dependent, so the first thing an agent should do is ask.
  */
 
 import { CosmosError, AUTH_HINT } from "../errors";
 import { guard, ok, type ToolRegistrar } from "./kit";
 import {
+  RESTRICTED_TOOLS as CATALOG_RESTRICTED,
   SIGNED_OUT_TOOLS as CATALOG_SIGNED_OUT,
   SIGNED_IN_ONLY_TOOLS as CATALOG_SIGNED_IN_ONLY,
 } from "./catalog";
@@ -36,13 +37,14 @@ export const PROFILE_COUNTS_QUERY = /* GraphQL */ `
 
 const SIGNED_OUT_TOOLS = [...CATALOG_SIGNED_OUT];
 const SIGNED_IN_ONLY_TOOLS = [...CATALOG_SIGNED_IN_ONLY];
+const RESTRICTED_TOOLS = [...CATALOG_RESTRICTED];
 
 const WHOAMI_DESCRIPTION = `Call this FIRST, before any other cosmos tool, to learn what this server can currently do.
 
 Reports whether a cosmos.so credential is configured and still valid, who it belongs to, and how many clusters (boards) and saved elements that account has.
 
 Read it as a capability probe:
-- authenticated: true  -> every tool works, including saving and creating boards.
+- authenticated: true  -> every standard tool works, including saving and creating boards (see \`toolsRestricted\` for paid/tier-gated tools).
 - authenticated: false -> only the read-only browse/search tools work. The result then explains exactly which environment variable is missing and how to fill it; relay that to the user rather than retrying the write.
 
 Never an error result and never a write. One cheap request, safe to call any time you are unsure whether a save will succeed.`;
@@ -81,15 +83,24 @@ export function signedOutPayload(
     reason === "missing"
       ? "Not signed in to cosmos.so: no credential is configured. Browsing and search still work."
       : "Not signed in to cosmos.so: the configured credential was rejected (expired or invalid session). Browsing and search still work.";
+  const howToFix =
+    reason === "rejected" && credential.authorizationConfigured
+      ? "The configured COSMOS_AUTHORIZATION bearer token was rejected or has expired. " +
+        "Copy a fresh `Authorization` header (starts with `Bearer `) from DevTools > Network > any api.cosmos.so " +
+        "request > Request Headers, or run `cosmos-mcp login`."
+      : reason === "rejected" && credential.cookieConfigured && !credential.authorizationConfigured
+        ? "The configured COSMOS_COOKIE was rejected (AWSALB load-balancer cookies alone cannot sign you in). " + AUTH_HINT
+        : AUTH_HINT;
   return {
     summary,
     authenticated: false,
     reason,
     viewer: null,
     credential,
-    howToFix: AUTH_HINT,
+    howToFix,
     toolsAvailableNow: SIGNED_OUT_TOOLS,
     toolsRequiringSignIn: SIGNED_IN_ONLY_TOOLS,
+    toolsRestricted: RESTRICTED_TOOLS,
   };
 }
 
@@ -143,7 +154,7 @@ export const registerAccountTools: ToolRegistrar = (server, ctx) => {
             ...rest,
             note:
               "A viewer id was available (COSMOS_USER_ID, or a cached lookup) but cosmos.so rejected the request, " +
-              "so the session cookie is missing or expired.",
+              "so the session credential is missing or expired.",
           });
         }
         // Anything else (network, rate limit) is not an auth problem: report
@@ -152,8 +163,8 @@ export const registerAccountTools: ToolRegistrar = (server, ctx) => {
 
       return ok(
         viewer.username
-          ? `Signed in to cosmos.so as @${viewer.username} (user ${viewer.id}). All tools available.`
-          : `Signed in to cosmos.so as user ${viewer.id}. All tools available.`,
+          ? `Signed in to cosmos.so as @${viewer.username} (user ${viewer.id}). All standard tools available.`
+          : `Signed in to cosmos.so as user ${viewer.id}. All standard tools available.`,
         {
           authenticated: true,
           viewer: {
@@ -164,6 +175,7 @@ export const registerAccountTools: ToolRegistrar = (server, ctx) => {
           credential,
           library: counts,
           toolsAvailableNow: [...SIGNED_OUT_TOOLS, ...SIGNED_IN_ONLY_TOOLS],
+          toolsRestricted: RESTRICTED_TOOLS,
         },
       );
     }),

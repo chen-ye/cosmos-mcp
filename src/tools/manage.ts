@@ -6,7 +6,7 @@
  * gap that made moodboarding awkward, "save this image I found to my board".
  *
  * Every tool here calls `requireViewer()` first, so a signed-out caller gets the
- * actionable "set COSMOS_COOKIE" message instead of a raw GraphQL failure.
+ * actionable "set COSMOS_AUTHORIZATION" message instead of a raw GraphQL failure.
  *
  * Two schema facts drive most of the code below and are easy to get wrong:
  *
@@ -37,13 +37,14 @@ import { guard, ok, type ToolRegistrar } from "./kit";
  * ------------------------------------------------------------------ */
 
 /**
- * Saving a URL. Cosmos offers three routes and this one is `element.create`:
+ * Saving a URL. Cosmos offers three routes and this one is `element.createFromUrl`:
  *
- *  - `element.create(input: { url })` — what the web app itself uses for "add by
- *    URL". Synchronous, and it returns the created element's id. That id is the
- *    currency of every other tool in this server (cosmos_organize_elements,
- *    cosmos_view_images, cosmos_find_clusters_for_element), so the agent can
- *    verify the save and keep working. Chosen for that reason.
+ *  - `element.createFromUrl(input: { userId, url, ... })` — what the web app
+ *    uses for "add by URL". Synchronous, and it returns the created element's
+ *    id (`CreateElementResponse`). That id is the currency of every other tool
+ *    in this server (cosmos_organize_elements, cosmos_view_images,
+ *    cosmos_find_clusters_for_element), so the agent can verify the save and
+ *    keep working. Chosen for that reason.
  *  - `import.request(input: { sourceUrl })` — Cosmos scrapes a whole page and
  *    creates however many elements it finds. Fire-and-forget: it returns only
  *    `success`, and progress has to be polled via `activeImports`. Better for
@@ -53,18 +54,14 @@ import { guard, ok, type ToolRegistrar } from "./kit";
  *
  * Both import routes validate against the live schema and are named in the tool
  * description, but shipping them as extra tools would give an agent three
- * near-identical ways to do one thing. `CreateElementInput` also accepts `text`,
- * `image` and `videoS3ObjectKey`, and takes exactly one content field per call;
- * only `url` is exposed here, so that constraint holds by construction.
+ * near-identical ways to do one thing.
  */
 export const SAVE_URL_MUTATION = /* GraphQL */ `
-  mutation CosmosMcpSaveUrl($userId: UserId!, $url: String, $sourceUrl: String, $clusterId: ClusterId) {
+  mutation CosmosMcpSaveUrl($userId: UserId!, $url: String!, $sourceUrl: String, $clusterId: ClusterId) {
     element {
-      create(input: { userId: $userId, url: $url, sourceUrl: $sourceUrl, clusterId: $clusterId }) {
+      createFromUrl(input: { userId: $userId, url: $url, sourceUrl: $sourceUrl, clusterId: $clusterId }) {
         id
         __typename
-        shareUrl
-        createdAt
       }
     }
   }
@@ -372,13 +369,13 @@ Not exposed, but available in the API if a bulk path is ever needed: \`import.re
     },
     guard(async (args: { url: string; clusterId?: number; sourceUrl?: string }) => {
       const viewer = await client.requireViewer("cosmos_save_url");
-      const data = await client.request<{ element: { create: any } }>("CosmosMcpSaveUrl", SAVE_URL_MUTATION, {
+      const data = await client.request<{ element: { createFromUrl: any } }>("CosmosMcpSaveUrl", SAVE_URL_MUTATION, {
         userId: viewer.id,
         url: args.url,
         sourceUrl: args.sourceUrl ?? null,
         clusterId: args.clusterId ?? null,
       });
-      const element = normalizeCreatedElement(data.element?.create);
+      const element = normalizeCreatedElement(data.element?.createFromUrl);
       if (!element) {
         return ok(`cosmos.so accepted the save of ${args.url} but returned no element.`, {
           success: false,
@@ -491,6 +488,18 @@ Returns \`changes\`, the list of what actually differed, so you can report back 
           next,
         );
         const success = Boolean(data.cluster?.update?.success);
+        if (!success) {
+          return ok(
+            `cosmos.so did not confirm the update to cluster ${args.clusterId} (attempted: ${changes.join(", ")}).`,
+            {
+              success: false,
+              clusterId: args.clusterId,
+              changes: [],
+              attemptedChanges: changes,
+              cluster: normalizeCluster(before.cluster),
+            },
+          );
+        }
         const cluster: NormalizedCluster | null = normalizeCluster({
           ...before.cluster,
           name: next.name,
@@ -498,12 +507,12 @@ Returns \`changes\`, the list of what actually differed, so you can report back 
           isPrivate: next.isPrivate,
           coverImageElementId: next.coverImageElementId,
         });
-        return ok(
-          success
-            ? `Cluster ${args.clusterId}: ${changes.join(", ")}.`
-            : `cosmos.so did not confirm the update to cluster ${args.clusterId}.`,
-          { success, clusterId: args.clusterId, changes, cluster },
-        );
+        return ok(`Cluster ${args.clusterId}: ${changes.join(", ")}.`, {
+          success: true,
+          clusterId: args.clusterId,
+          changes,
+          cluster,
+        });
       },
     ),
   );

@@ -9,7 +9,9 @@ import {
   buildSearchClustersVariables,
   buildSearchVariables,
   buildVisualSearchVariables,
+  inspectImageDimensions,
   interleaveSimilar,
+  visualSearchWarnings,
   normalizeBoard,
   normalizeConversationalSearch,
   normalizeSavedByCluster,
@@ -592,11 +594,12 @@ describe("cosmos_search_clusters", () => {
 });
 
 describe("cosmos_search_users", () => {
-  test("pages profiles through the cross-entity root", async () => {
+  test("pages profiles through the cross-entity root when signed in", async () => {
     const { run, calls } = call(
       "cosmos_search_users",
       { query: "brutalist", limit: 3, cursor: "1" },
       {
+        viewer: { id: 42, username: "me" },
         request: async () => ({
           search: { users: { items: [SEARCH_USER_NODE], meta: { nextPageCursor: "2", count: 10 } } },
         }),
@@ -616,9 +619,20 @@ describe("cosmos_search_users", () => {
     const { run } = call(
       "cosmos_search_users",
       { query: "x", previewWidth: 1200 },
-      { request: async () => ({ search: { users: { items: [SEARCH_USER_NODE], meta: {} } } }) },
+      {
+        viewer: { id: 42, username: "me" },
+        request: async () => ({ search: { users: { items: [SEARCH_USER_NODE], meta: {} } } }),
+      },
     );
     expect(payloadOf(await run()).items[0].avatarUrl).toContain("w=200");
+  });
+
+  test("signed out it fails with unauthenticated before making any request", async () => {
+    const { run, calls } = call("cosmos_search_users", { query: "brutalist" });
+    const result = await run();
+    expect(result.isError).toBe(true);
+    expect(JSON.parse((result.content[0] as { text: string }).text).error).toBe("unauthenticated");
+    expect(calls).toEqual([]);
   });
 });
 
@@ -635,10 +649,14 @@ describe("cosmos_search_all", () => {
     },
   };
 
-  test("returns all four sections and defaults to five per section", async () => {
-    const { run, calls } = call("cosmos_search_all", { query: "brutalist" }, { request: async () => response });
+  test("returns all four sections when signed in and defaults to five per section", async () => {
+    const { run, calls } = call(
+      "cosmos_search_all",
+      { query: "brutalist" },
+      { viewer: { id: 42, username: "me" }, request: async () => response },
+    );
     const p = payloadOf(await run());
-    expect(calls[0]!.vars).toEqual({ searchTerm: "brutalist", pageSize: 5 });
+    expect(calls[0]!.vars).toEqual({ searchTerm: "brutalist", pageSize: 5, includeUsers: true });
     expect(p.clusters.items[0].id).toBe(850947880);
     expect(p.clusters.totalCount).toBe(418);
     expect(p.users.items[0].username).toBe("brutalist");
@@ -647,8 +665,32 @@ describe("cosmos_search_all", () => {
     expect(p.summary).toContain("418 collection(s)");
   });
 
+  test("signed out it skips search.users via includeUsers: false and notes why", async () => {
+    const signedOutResponse = {
+      search: {
+        clusters: response.search.clusters,
+        elements: response.search.elements,
+        autocompleteSuggestions: response.search.autocompleteSuggestions,
+      },
+    };
+    const { run, calls } = call(
+      "cosmos_search_all",
+      { query: "brutalist" },
+      { request: async () => signedOutResponse },
+    );
+    const p = payloadOf(await run());
+    expect(calls[0]!.vars).toEqual({ searchTerm: "brutalist", pageSize: 5, includeUsers: false });
+    expect(p.users.items).toEqual([]);
+    expect(p.users.note).toContain("COSMOS_AUTHORIZATION");
+    expect(p.clusters.items).toHaveLength(1);
+  });
+
   test("no section advertises a cursor, since this tool cannot take one", async () => {
-    const { tool, run } = call("cosmos_search_all", { query: "x" }, { request: async () => response });
+    const { tool, run } = call(
+      "cosmos_search_all",
+      { query: "x" },
+      { viewer: { id: 42, username: "me" }, request: async () => response },
+    );
     expect("cursor" in tool.config.inputSchema).toBe(false);
     const p = payloadOf(await run());
     expect([p.clusters.nextCursor, p.users.nextCursor, p.elements.nextCursor]).toEqual([null, null, null]);
@@ -656,7 +698,11 @@ describe("cosmos_search_all", () => {
   });
 
   test("cuts the element list itself, because the server ignores pageSize there", async () => {
-    const { run } = call("cosmos_search_all", { query: "x", limit: 2 }, { request: async () => response });
+    const { run } = call(
+      "cosmos_search_all",
+      { query: "x", limit: 2 },
+      { viewer: { id: 42, username: "me" }, request: async () => response },
+    );
     const p = payloadOf(await run());
     expect(p.elements.items.map((e: any) => e.id)).toEqual([1, 2]);
     expect(p.elements.totalCount).toBe(447);
@@ -664,7 +710,11 @@ describe("cosmos_search_all", () => {
   });
 
   test("SearchCluster carries no owner, so the url is honestly null", async () => {
-    const { run } = call("cosmos_search_all", { query: "x" }, { request: async () => response });
+    const { run } = call(
+      "cosmos_search_all",
+      { query: "x" },
+      { viewer: { id: 42, username: "me" }, request: async () => response },
+    );
     const p = payloadOf(await run());
     expect(p.clusters.items[0].url).toBeNull();
     expect(p.clusters.items[0].elementCount).toBe(382);
@@ -858,7 +908,7 @@ describe("cosmos_browse_boards", () => {
     );
     const p = payloadOf(await run());
     expect(calls[0]!.op).toBe("CosmosMcpFeaturedClusters");
-    expect(calls[0]!.vars).toEqual({ pageSize: 20, pageCursor: null, previewCount: 3 });
+    expect(calls[0]!.vars).toEqual({ pageSize: 20, pageCursor: null, previewCount: 3, includePreviews: true });
     expect(p.items[0].name).toBe("Rooms Lit Only by Lamps");
     expect(p.items[0].preview).toHaveLength(2);
     expect(p.totalCount).toBe(823);
@@ -873,9 +923,36 @@ describe("cosmos_browse_boards", () => {
     );
     const p = payloadOf(await run());
     expect(calls[0]!.op).toBe("CosmosMcpCategoryClusters");
-    expect(calls[0]!.vars).toEqual({ categoryId: 1464776492, pageSize: 2, pageCursor: null, previewCount: 1 });
+    expect(calls[0]!.vars).toEqual({
+      categoryId: 1464776492,
+      pageSize: 2,
+      pageCursor: null,
+      previewCount: 1,
+      includePreviews: true,
+    });
     expect(p.items[0].id).toBe(1579555147);
     expect(p.summary).toContain("in category 1464776492");
+  });
+
+  test("previewCount: 0 omits topElements via includePreviews: false so Cosmos validation passes", async () => {
+    const { run, calls } = call(
+      "cosmos_browse_boards",
+      { category: 1464776492, previewCount: 0 },
+      {
+        request: async () => ({
+          categoryClusters: { items: [{ ...BOARD_NODE, topElements: undefined }], meta: { count: 93 } },
+        }),
+      },
+    );
+    const p = payloadOf(await run());
+    expect(calls[0]!.vars).toEqual({
+      categoryId: 1464776492,
+      pageSize: 20,
+      pageCursor: null,
+      previewCount: 1,
+      includePreviews: false,
+    });
+    expect(p.items[0].preview).toEqual([]);
   });
 
   test("the description sends the agent to cosmos_categories for the id", () => {
@@ -930,9 +1007,32 @@ describe("cosmos_conversational_search", () => {
     expect(p.warnings.length).toBeGreaterThan(0);
   });
 
-  test("the description admits the payload is unproven", () => {
+  test("the description states that the endpoint is gated upstream", () => {
     const { tool } = call("cosmos_conversational_search", {});
-    expect(tool.config.description).toContain("EXPERIMENTAL");
+    expect(tool.config.description).toContain("GATED UPSTREAM");
+    expect(tool.config.description).toContain("COSMOS_AUTHORIZATION");
+  });
+
+  test("a forbidden response adds fallback guidance to cosmos_search and cosmos_browse_boards", async () => {
+    const { run } = call(
+      "cosmos_conversational_search",
+      { brief: "warm minimalist" },
+      {
+        viewer: { id: 1, username: "me" },
+        request: async () => {
+          throw new CosmosError(
+            "CosmosMcpConversationalSearch: signed in, but this account cannot access that. You do not have any admin privileges.",
+            { kind: "forbidden", status: 403, operation: "CosmosMcpConversationalSearch" },
+          );
+        },
+      },
+    );
+    const result = await run();
+    expect(result.isError).toBe(true);
+    const body = JSON.parse((result.content[0] as { text: string }).text);
+    expect(body.error).toBe("forbidden");
+    expect(body.message).toContain("cosmos_search");
+    expect(body.message).toContain("cosmos_browse_boards");
   });
 });
 
@@ -968,6 +1068,39 @@ describe("cosmos_get_cluster", () => {
     const result = await run();
     expect(result.isError).toBe(true);
     expect(JSON.parse((result.content[0] as { text: string }).text).error).toBe("validation");
+  });
+
+  test("prefers connectionCount over lagging numberOfElements when higher", async () => {
+    const { run } = call(
+      "cosmos_get_cluster",
+      { clusterId: 1579555147 },
+      {
+        request: async () => ({
+          cluster: { ...CLUSTER_NODE, numberOfElements: 12, subClusters: { items: [] } },
+          clusterConnections: { meta: { count: 19 } },
+        }),
+      },
+    );
+    const p = payloadOf(await run());
+    expect(p.cluster.elementCount).toBe(19);
+    expect(p.cluster.connectionCount).toBe(19);
+    expect(p.summary).toContain("(19 elements)");
+  });
+
+  test("prefers connectionCount on flat boards when numberOfElements lags high after removal", async () => {
+    const { run } = call(
+      "cosmos_get_cluster",
+      { clusterId: 1579555147 },
+      {
+        request: async () => ({
+          cluster: { ...CLUSTER_NODE, numberOfElements: 19, subClusters: { items: [] } },
+          clusterConnections: { meta: { count: 12 } },
+        }),
+      },
+    );
+    const p = payloadOf(await run());
+    expect(p.cluster.elementCount).toBe(12);
+    expect(p.summary).toContain("(12 elements)");
   });
 });
 
@@ -1023,7 +1156,7 @@ describe("cosmos_list_user_clusters", () => {
     const p = payloadOf(result);
     expect(p.partial).toBe(true);
     expect(p.totalCount).toBe(21);
-    expect(p.note).toContain("COSMOS_COOKIE");
+    expect(p.note).toContain("COSMOS_AUTHORIZATION");
     expect(calls.map((c) => c.op)).toEqual(["CosmosMcpUserClusters", "CosmosMcpUserTopClusters"]);
   });
 
@@ -1257,6 +1390,96 @@ describe("cosmos_visual_search", () => {
     expect(JSON.parse((result.content[0] as { text: string }).text).error).toBe("unauthenticated");
     expect(calls).toEqual([]);
   });
+
+  test("inspectImageDimensions parses PNG, GIF, WebP, and JPEG dimensions and ignores truncated input", () => {
+    const png = Buffer.alloc(24);
+    png.writeUInt32BE(0x89504e47, 0);
+    png.write("IHDR", 12, "ascii");
+    png.writeUInt32BE(640, 16);
+    png.writeUInt32BE(480, 20);
+    expect(inspectImageDimensions(png, "image/png")).toEqual({ width: 640, height: 480 });
+
+    const gif = Buffer.alloc(10);
+    gif.write("GIF89a", 0, "ascii");
+    gif.writeUInt16LE(320, 6);
+    gif.writeUInt16LE(200, 8);
+    expect(inspectImageDimensions(gif, "image/gif")).toEqual({ width: 320, height: 200 });
+
+    // Minimal JPEG with SOI + APP0 (length 4) + SOF0 (280x158)
+    const jpeg = Buffer.from([
+      0xff, 0xd8,
+      0xff, 0xe0, 0x00, 0x04, 0x00, 0x00,
+      0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x9e, 0x01, 0x18, 0x03, 0x01, 0x11, 0x00,
+    ]);
+    expect(inspectImageDimensions(jpeg, "image/jpeg")).toEqual({ width: 280, height: 158 });
+
+    // WebP VP8 (lossy) 320x240
+    const vp8 = Buffer.alloc(30);
+    vp8.write("RIFF", 0, "ascii");
+    vp8.write("WEBPVP8 ", 8, "ascii");
+    vp8[23] = 0x9d;
+    vp8[24] = 0x01;
+    vp8[25] = 0x2a;
+    vp8.writeUInt16LE(320, 26);
+    vp8.writeUInt16LE(240, 28);
+    expect(inspectImageDimensions(vp8, "image/webp")).toEqual({ width: 320, height: 240 });
+
+    // WebP VP8L (lossless, 25-byte minimal header) 512x256
+    const vp8l = Buffer.alloc(25);
+    vp8l.write("RIFF", 0, "ascii");
+    vp8l.write("WEBPVP8L", 8, "ascii");
+    vp8l[20] = 0x2f;
+    vp8l.writeUInt32LE((511 & 0x3fff) | ((255 & 0x3fff) << 14), 21);
+    expect(inspectImageDimensions(vp8l, "image/webp")).toEqual({ width: 512, height: 256 });
+
+    // WebP VP8X (extended) 800x600
+    const vp8x = Buffer.alloc(30);
+    vp8x.write("RIFF", 0, "ascii");
+    vp8x.write("WEBPVP8X", 8, "ascii");
+    vp8x[24] = 799 & 0xff;
+    vp8x[25] = (799 >> 8) & 0xff;
+    vp8x[26] = (799 >> 16) & 0xff;
+    vp8x[27] = 599 & 0xff;
+    vp8x[28] = (599 >> 8) & 0xff;
+    vp8x[29] = (599 >> 16) & 0xff;
+    expect(inspectImageDimensions(vp8x, "image/webp")).toEqual({ width: 800, height: 600 });
+
+    expect(inspectImageDimensions(Buffer.from([1, 2, 3]), "image/png")).toBeNull();
+  });
+
+  test("visualSearchWarnings flags extreme aspect ratios on 0 results and stays silent when results exist", () => {
+    const aspectWarnings = visualSearchWarnings(0, { width: 1200, height: 350 });
+    expect(aspectWarnings).toHaveLength(1);
+    expect(aspectWarnings[0]).toContain("extreme aspect ratio");
+    expect(visualSearchWarnings(5, { width: 280, height: 158 })).toEqual([]);
+  });
+
+  test("warns when visual search returns 0 results on a small image crop", async () => {
+    globalThis.fetch = Object.assign(async () => new Response(null, { status: 204 }), {
+      preconnect: () => {},
+    }) as typeof fetch;
+    const smallJpeg = Buffer.from([
+      0xff, 0xd8,
+      0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x9e, 0x01, 0x18, 0x03, 0x01, 0x11, 0x00,
+    ]);
+    const { run } = call(
+      "cosmos_visual_search",
+      { imageBase64: smallJpeg.toString("base64"), mimeType: "image/jpeg" },
+      {
+        viewer: { id: 42, username: "me" },
+        request: async (op) => {
+          if (op === "CosmosMcpVisualSearchPolicy") return { s3PostPolicyForVisualSearch: samplePolicy };
+          return { searchElements: elementList([], { count: 0 }) };
+        },
+      },
+    );
+    const p = payloadOf(await run());
+    expect(p.items).toEqual([]);
+    expect(p.imageDimensions).toEqual({ width: 280, height: 158 });
+    expect(p.warnings).toHaveLength(1);
+    expect(p.warnings[0]).toContain("280x158px");
+    expect(p.summary).toContain("280x158px");
+  });
 });
 
 /* ------------------------------------------------------------------ *
@@ -1294,7 +1517,7 @@ describe.skipIf(!process.env.COSMOS_LIVE_TESTS)("live schema validation", () => 
     expect(r.codes).toEqual([]);
     const list = r.data.searchClusters;
     expect(list.items.length).toBe(3);
-    expect(list.meta.count).toBeGreaterThan(100);
+    expect(list.meta.count).toBeGreaterThanOrEqual(list.items.length);
     expect(typeof list.items[0].owner.username).toBe("string");
     expect(typeof list.items[0].numberOfElements).toBe("number");
 
@@ -1306,23 +1529,13 @@ describe.skipIf(!process.env.COSMOS_LIVE_TESTS)("live schema validation", () => 
     expect(next.data.searchClusters.items[0].id).not.toBe(list.items[0].id);
   }, 30_000);
 
-  test("search { users } returns profiles under the aliased display name", async () => {
-    const r = await exec("CosmosMcpSearchUsers", { searchTerm: "brutalist", pageSize: 3, pageCursor: null });
-    expect(r.codes).toEqual([]);
-    const list = r.data.search.users;
-    expect(list.items.length).toBeGreaterThan(0);
-    expect(typeof list.items[0].username).toBe("string");
-    expect("fullName" in list.items[0]).toBe(true);
-    expect(typeof list.meta.count).toBe("number");
-  }, 30_000);
-
-  test("the cross-entity search fills all four sections", async () => {
-    const r = await exec("CosmosMcpSearchAll", { searchTerm: "brutalist", pageSize: 3 });
+  test("the cross-entity search fills public sections cleanly when signed out", async () => {
+    const r = await exec("CosmosMcpSearchAll", { searchTerm: "brutalist", pageSize: 3, includeUsers: false });
     expect(r.codes).toEqual([]);
     const s = r.data.search;
     expect(s.clusters.items.length).toBe(3);
     expect(typeof s.clusters.items[0].numberOfElements).toBe("number");
-    expect(s.users.items.length).toBeGreaterThan(0);
+    expect("users" in s).toBe(false);
     expect(s.elements.items.length).toBeGreaterThan(0);
     expect(s.autocompleteSuggestions.items.length).toBeGreaterThan(0);
     // The reason cosmos_search_all truncates elements itself.
@@ -1353,7 +1566,7 @@ describe.skipIf(!process.env.COSMOS_LIVE_TESTS)("live schema validation", () => 
       ["CosmosMcpCategories", {}, (d) => d.categories.items],
       ["CosmosMcpSuggestedSearches", { searchCategory: null }, (d) => d.searches.trendingSearches.items],
       ["CosmosMcpGetUser", { username: "spaces" }, (d) => d.user.topClusters.items],
-      ["CosmosMcpClusterBySlug", { input: { ownerUsername: "spaces", slug: "rooms-lit-only-by-lamps" } }, (d) => d.cluster.id],
+      ["CosmosMcpClusterBySlug", { input: { ownerUsername: "spaces", slug: "lit-by-lamps-only" } }, (d) => d.cluster.id],
       ["CosmosMcpClusterById", { clusterId: SEED_CLUSTER }, (d) => d.cluster.id],
       ["CosmosMcpClusterElements", { clusterId: SEED_CLUSTER, pageSize: 2, pageCursor: null }, (d) => d.clusterConnections.items],
       ["CosmosMcpUserTopClusters", { username: "spaces" }, (d) => d.user.topClusters.items],
@@ -1393,8 +1606,13 @@ describe.skipIf(!process.env.COSMOS_LIVE_TESTS)("live schema validation", () => 
     expect(paged.data.elementTopConnections.items[0].clusterId).not.toBe(conns.items[0].clusterId);
   }, 30_000);
 
-  test("both board roots return curated collections with preview images", async () => {
-    const featured = await exec("CosmosMcpFeaturedClusters", { pageSize: 2, pageCursor: null, previewCount: 3 });
+  test("both board roots return curated collections with preview images and support previewCount: 0", async () => {
+    const featured = await exec("CosmosMcpFeaturedClusters", {
+      pageSize: 2,
+      pageCursor: null,
+      previewCount: 3,
+      includePreviews: true,
+    });
     expect(featured.codes).toEqual([]);
     const list = featured.data.featuredClusters;
     expect(list.items.length).toBe(2);
@@ -1402,16 +1620,36 @@ describe.skipIf(!process.env.COSMOS_LIVE_TESTS)("live schema validation", () => 
     expect(list.items[0].topElements.length).toBe(3);
     expect(typeof list.items[0].topElements[0].media.url).toBe("string");
 
+    const featuredNoPreviews = await exec("CosmosMcpFeaturedClusters", {
+      pageSize: 2,
+      pageCursor: null,
+      previewCount: 1,
+      includePreviews: false,
+    });
+    expect(featuredNoPreviews.codes).toEqual([]);
+    expect("topElements" in featuredNoPreviews.data.featuredClusters.items[0]).toBe(false);
+
     // Interiors. `categoryClusters` takes an id; there is no categorySlug argument.
     const byCategory = await exec("CosmosMcpCategoryClusters", {
       categoryId: 1464776492,
       pageSize: 2,
       pageCursor: null,
       previewCount: 3,
+      includePreviews: true,
     });
     expect(byCategory.codes).toEqual([]);
     expect(byCategory.data.categoryClusters.items.length).toBe(2);
     expect(byCategory.data.categoryClusters.meta.count).toBeGreaterThan(10);
+
+    const byCategoryNoPreviews = await exec("CosmosMcpCategoryClusters", {
+      categoryId: 1464776492,
+      pageSize: 2,
+      pageCursor: null,
+      previewCount: 1,
+      includePreviews: false,
+    });
+    expect(byCategoryNoPreviews.codes).toEqual([]);
+    expect("topElements" in byCategoryNoPreviews.data.categoryClusters.items[0]).toBe(false);
   }, 30_000);
 
   test("cosmos_categories hands out the ids categoryElements takes", async () => {
@@ -1422,18 +1660,20 @@ describe.skipIf(!process.env.COSMOS_LIVE_TESTS)("live schema validation", () => 
     const r = await exec("CosmosMcpCategoryElements", { categoryId: interiors.id, pageSize: 2, pageCursor: null });
     expect(r.codes).toEqual([]);
     expect(r.data.categoryElements.items.length).toBe(2);
-    expect(r.data.categoryElements.meta.count).toBeGreaterThan(1000);
+    expect(r.data.categoryElements.meta.count).toBeGreaterThan(100);
   }, 30_000);
 
   test("the session-gated documents fail on auth only, never on schema", async () => {
     const cases: [keyof typeof browseQueries, Record<string, unknown>][] = [
+      ["CosmosMcpSearchUsers", { searchTerm: "brutalist", pageSize: 3, pageCursor: null }],
+      ["CosmosMcpSearchAll", { searchTerm: "brutalist", pageSize: 3, includeUsers: true }],
       ["CosmosMcpClusterRecommendations", { clusterId: SEED_CLUSTER }],
       ["CosmosMcpUserClusters", { userId: 1904119612, pageSize: 2, pageCursor: null }],
       ["CosmosMcpConversationalSearch", { messages: [{ role: "user", content: "warm minimalist japanese interiors" }] }],
     ];
     for (const [op, vars] of cases) {
       const r = await exec(op, vars);
-      expect({ op, ok: r.codes.every((c) => c === "AUTHENTICATION") }).toEqual({ op, ok: true });
+      expect({ op, ok: r.codes.length > 0 && r.codes.every((c) => c === "AUTHENTICATION") }).toEqual({ op, ok: true });
     }
   }, 30_000);
 

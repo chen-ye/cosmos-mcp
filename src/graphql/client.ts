@@ -17,30 +17,54 @@ const MAX_ATTEMPTS = 3;
  * without it are treated as unknown clients.
  */
 export class CosmosClient {
-  readonly config: CosmosConfig;
-  private viewerId: number | null | undefined;
+  private _config: CosmosConfig;
+  private readonly reload?: () => CosmosConfig;
   private viewerPromise: Promise<Viewer | null> | undefined;
 
-  constructor(config: CosmosConfig) {
-    this.config = config;
+  constructor(config: CosmosConfig, reload?: () => CosmosConfig) {
+    this._config = config;
+    this.reload = reload;
+  }
+
+  /** Latest configuration, re-reading external config sources when a reloader is attached. */
+  get config(): CosmosConfig {
+    this.syncConfig();
+    return this._config;
+  }
+
+  private syncConfig(): void {
+    if (!this.reload) return;
+    const fresh = this.reload();
+    if (
+      fresh.authorization !== this._config.authorization ||
+      fresh.cookie !== this._config.cookie ||
+      fresh.userId !== this._config.userId ||
+      fresh.endpoint !== this._config.endpoint
+    ) {
+      this._config = fresh;
+      this.viewerPromise = undefined;
+    } else {
+      this._config = fresh;
+    }
   }
 
   /** True when a credential is configured. Says nothing about it still being valid. */
   get hasCredentials(): boolean {
-    return Boolean(this.config.cookie || this.config.authorization);
+    const cfg = this.config;
+    return Boolean(cfg.cookie || cfg.authorization);
   }
 
-  private headers(): Record<string, string> {
+  private headers(cfg: CosmosConfig): Record<string, string> {
     const h: Record<string, string> = {
       "content-type": "application/json",
       accept: "application/graphql-response+json,application/json;q=0.9",
-      "x-client-name": this.config.clientName,
+      "x-client-name": cfg.clientName,
       origin: "https://www.cosmos.so",
       referer: "https://www.cosmos.so/",
-      "user-agent": this.config.userAgent,
+      "user-agent": cfg.userAgent,
     };
-    if (this.config.cookie) h.cookie = this.config.cookie;
-    if (this.config.authorization) h.authorization = this.config.authorization;
+    if (cfg.cookie) h.cookie = cfg.cookie;
+    if (cfg.authorization) h.authorization = cfg.authorization;
     return h;
   }
 
@@ -53,7 +77,8 @@ export class CosmosClient {
    * `data` is present we return it and let the caller decide.
    */
   async request<T>(operationName: string, query: string, variables: Record<string, unknown> = {}): Promise<T> {
-    const url = `${this.config.endpoint}?q=${encodeURIComponent(operationName)}`;
+    const cfg = this.config;
+    const url = `${cfg.endpoint}?q=${encodeURIComponent(operationName)}`;
     const body = JSON.stringify({ operationName, query, variables });
 
     let lastError: CosmosError | undefined;
@@ -62,9 +87,9 @@ export class CosmosClient {
       try {
         res = await fetch(url, {
           method: "POST",
-          headers: this.headers(),
+          headers: this.headers(cfg),
           body,
-          signal: AbortSignal.timeout(this.config.timeoutMs),
+          signal: AbortSignal.timeout(cfg.timeoutMs),
         });
       } catch (cause) {
         lastError = new CosmosError(`${operationName}: request to cosmos.so failed (${String(cause)})`, {
@@ -98,6 +123,7 @@ export class CosmosClient {
       const errors = payload.errors ?? [];
       if (errors.length > 0 && (payload.data === undefined || payload.data === null)) {
         const kind = classify(errors[0]?.extensions?.code as string | undefined, res.status);
+        if (kind === "unauthenticated") this.viewerPromise = undefined;
         throw new CosmosError(describe(kind, errors, operationName), {
           kind,
           status: res.status,
@@ -121,23 +147,34 @@ export class CosmosClient {
   }
 
   /**
-   * Resolves the signed-in user, caching both hits and misses. Returns null
-   * when no credential is configured or the session has expired, so read-only
-   * tools can keep working instead of hard-failing.
+   * Resolves the signed-in user, caching active viewer lookups until credentials
+   * change or an auth failure clears the cache. Returns null when no credential
+   * is configured or the session has expired, so read-only tools can keep working
+   * instead of hard-failing.
    */
   async viewer(): Promise<Viewer | null> {
-    if (this.config.userId) return { id: this.config.userId, username: null };
-    if (!this.hasCredentials) return null;
-    this.viewerPromise ??= this.request<{ me: { id: number; username: string } }>(
-      "CosmosMcpViewer",
-      "query CosmosMcpViewer { me { id username } }",
-    )
-      .then((d) => ({ id: d.me.id, username: d.me.username }))
-      .catch((err) => {
-        if (err instanceof CosmosError && (err.kind === "unauthenticated" || err.kind === "forbidden")) return null;
-        this.viewerPromise = undefined; // transient failure: allow a retry
-        throw err;
-      });
+    const cfg = this.config;
+    if (cfg.userId && cfg.skipMeLookup !== false) return { id: cfg.userId, username: null };
+    if (!cfg.cookie && !cfg.authorization) return null;
+    if (!this.viewerPromise) {
+      const pending = this.request<{ me: { id: number; username: string } | null }>(
+        "CosmosMcpViewer",
+        "query CosmosMcpViewer { me { id username } }",
+      )
+        .then((d) => {
+          if (!d.me) {
+            if (this.viewerPromise === pending) this.viewerPromise = undefined;
+            return null;
+          }
+          return { id: d.me.id, username: d.me.username };
+        })
+        .catch((err) => {
+          if (this.viewerPromise === pending) this.viewerPromise = undefined;
+          if (err instanceof CosmosError && (err.kind === "unauthenticated" || err.kind === "forbidden")) return null;
+          throw err;
+        });
+      this.viewerPromise = pending;
+    }
     return this.viewerPromise;
   }
 
